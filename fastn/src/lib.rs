@@ -69,12 +69,12 @@ async fn run() -> Result<(), String> {
             force_fallback_adapter: false,
         })
         .await
-        .ok_or("Failed to find adapter")?;
+        .map_err(|e| format!("Failed to find adapter: {:?}", e))?;
 
     log::info!("Adapter acquired: {:?}", adapter.get_info());
 
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor::default(), None)
+    let (device, queue): (wgpu::Device, wgpu::Queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor::default())
         .await
         .map_err(|e| format!("Failed to create device: {:?}", e))?;
 
@@ -88,7 +88,7 @@ async fn run() -> Result<(), String> {
         .copied()
         .unwrap_or(surface_caps.formats[0]);
 
-    let mut config = wgpu::SurfaceConfiguration {
+    let config = wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
         width,
@@ -189,6 +189,7 @@ fn render(state: &State) {
                     load: wgpu::LoadOp::Clear(state.clear_color),
                     store: wgpu::StoreOp::Store,
                 },
+                depth_slice: None,
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
