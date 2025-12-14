@@ -1,4 +1,8 @@
 use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use std::cell::RefCell;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -6,19 +10,45 @@ use winit::{
     window::{Window, WindowId},
 };
 
-// Light orange/yellow clear color (peach)
-const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 1.0,
-    g: 0.9,
-    b: 0.7,
-    a: 1.0,
-};
+fn random_soothing_color() -> wgpu::Color {
+    // Generate soothing pastel colors by using high base values with small random variations
+    let base = 0.6;
+    let range = 0.3;
+
+    // Simple pseudo-random using time
+    #[cfg(not(target_arch = "wasm32"))]
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+
+    #[cfg(target_arch = "wasm32")]
+    let seed = {
+        let perf = web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now() as u64)
+            .unwrap_or(0);
+        perf.wrapping_mul(1103515245).wrapping_add(12345)
+    };
+
+    // Simple LCG for pseudo-random
+    let r_seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+    let g_seed = r_seed.wrapping_mul(1103515245).wrapping_add(12345);
+    let b_seed = g_seed.wrapping_mul(1103515245).wrapping_add(12345);
+
+    let r = base + (r_seed % 1000) as f64 / 1000.0 * range;
+    let g = base + (g_seed % 1000) as f64 / 1000.0 * range;
+    let b = base + (b_seed % 1000) as f64 / 1000.0 * range;
+
+    wgpu::Color { r, g, b, a: 1.0 }
+}
 
 struct GfxState {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    clear_color: wgpu::Color,
 }
 
 impl GfxState {
@@ -81,6 +111,7 @@ impl GfxState {
             device,
             queue,
             config,
+            clear_color: random_soothing_color(),
         })
     }
 
@@ -90,6 +121,10 @@ impl GfxState {
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
         }
+    }
+
+    fn change_color(&mut self) {
+        self.clear_color = random_soothing_color();
     }
 
     fn render(&self) {
@@ -122,7 +157,7 @@ impl GfxState {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                        load: wgpu::LoadOp::Clear(self.clear_color),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -140,7 +175,10 @@ impl GfxState {
 
 struct App {
     window: Option<Arc<Window>>,
+    #[cfg(not(target_arch = "wasm32"))]
     gfx: Option<GfxState>,
+    #[cfg(target_arch = "wasm32")]
+    gfx: Rc<RefCell<Option<GfxState>>>,
     #[cfg(not(target_arch = "wasm32"))]
     sdl_context: Option<sdl2::Sdl>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -149,6 +187,16 @@ struct App {
     game_controller_subsystem: Option<sdl2::GameControllerSubsystem>,
     #[cfg(not(target_arch = "wasm32"))]
     controllers: std::collections::HashMap<u32, sdl2::controller::GameController>,
+    #[cfg(target_arch = "wasm32")]
+    gamepad_state: WebGamepadState,
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Default)]
+struct WebGamepadState {
+    connected: std::collections::HashSet<u32>,
+    button_states: std::collections::HashMap<(u32, u32), bool>,
+    axis_states: std::collections::HashMap<(u32, u32), i32>,
 }
 
 impl App {
@@ -156,7 +204,8 @@ impl App {
     fn new() -> Self {
         Self {
             window: None,
-            gfx: None,
+            gfx: Rc::new(RefCell::new(None)),
+            gamepad_state: WebGamepadState::default(),
         }
     }
 
@@ -227,28 +276,33 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn poll_gamepad_events(&mut self) {
-        let Some(event_pump) = &mut self.event_pump else {
-            return;
-        };
-        let Some(gc_subsystem) = &self.game_controller_subsystem else {
-            return;
+        // Collect events first to avoid borrow conflicts
+        let events: Vec<_> = {
+            let Some(event_pump) = &mut self.event_pump else {
+                return;
+            };
+            event_pump.poll_iter().collect()
         };
 
-        for event in event_pump.poll_iter() {
+        let mut had_input = false;
+
+        for event in events {
             use sdl2::event::Event;
             match event {
                 Event::ControllerDeviceAdded { which, .. } => {
-                    if gc_subsystem.is_game_controller(which) {
-                        match gc_subsystem.open(which) {
-                            Ok(controller) => {
-                                log::info!(
-                                    "Gamepad connected: {} (id: {})",
-                                    controller.name(),
-                                    which
-                                );
-                                self.controllers.insert(which, controller);
+                    if let Some(gc_subsystem) = &self.game_controller_subsystem {
+                        if gc_subsystem.is_game_controller(which) {
+                            match gc_subsystem.open(which) {
+                                Ok(controller) => {
+                                    log::info!(
+                                        "Gamepad connected: {} (id: {})",
+                                        controller.name(),
+                                        which
+                                    );
+                                    self.controllers.insert(which, controller);
+                                }
+                                Err(e) => log::warn!("Failed to open controller {}: {}", which, e),
                             }
-                            Err(e) => log::warn!("Failed to open controller {}: {}", which, e),
                         }
                     }
                 }
@@ -267,6 +321,7 @@ impl App {
                         button,
                         which
                     );
+                    had_input = true;
                 }
                 Event::ControllerButtonUp { which, button, .. } => {
                     log::info!(
@@ -274,6 +329,7 @@ impl App {
                         button,
                         which
                     );
+                    had_input = true;
                 }
                 Event::ControllerAxisMotion {
                     which, axis, value, ..
@@ -287,10 +343,124 @@ impl App {
                             value,
                             which
                         );
+                        had_input = true;
                     }
                 }
                 _ => {}
             }
+        }
+
+        if had_input {
+            self.on_input_event();
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn poll_gamepad_events(&mut self) {
+        use wasm_bindgen::JsCast;
+
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let navigator = window.navigator();
+        let Ok(gamepads_js) = navigator.get_gamepads() else {
+            return;
+        };
+
+        let mut current_connected: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+        for i in 0..gamepads_js.length() {
+            let gamepad_js: wasm_bindgen::JsValue = gamepads_js.get(i);
+            // getGamepads returns nullable entries
+            if gamepad_js.is_null() || gamepad_js.is_undefined() {
+                continue;
+            }
+            let Ok(gamepad) = gamepad_js.dyn_into::<web_sys::Gamepad>() else {
+                continue;
+            };
+
+            let index = gamepad.index();
+            current_connected.insert(index);
+
+            // Check for new connection
+            if !self.gamepad_state.connected.contains(&index) {
+                log::info!("Gamepad connected: {} (id: {})", gamepad.id(), index);
+                // Log initial button/axis count
+                log::info!("  Buttons: {}, Axes: {}", gamepad.buttons().length(), gamepad.axes().length());
+            }
+
+            // Poll buttons
+            let buttons = gamepad.buttons();
+            for btn_idx in 0..buttons.length() {
+                let button_js: wasm_bindgen::JsValue = buttons.get(btn_idx);
+                if button_js.is_null() || button_js.is_undefined() {
+                    continue;
+                }
+                let Ok(button) = button_js.dyn_into::<web_sys::GamepadButton>() else {
+                    continue;
+                };
+                let pressed = button.pressed();
+                let key = (index, btn_idx);
+                let was_pressed = self.gamepad_state.button_states.get(&key).copied().unwrap_or(false);
+
+                if pressed && !was_pressed {
+                    log::info!("Gamepad button pressed: {} (controller: {})", btn_idx, index);
+                    self.on_input_event();
+                } else if !pressed && was_pressed {
+                    log::info!("Gamepad button released: {} (controller: {})", btn_idx, index);
+                    self.on_input_event();
+                }
+                self.gamepad_state.button_states.insert(key, pressed);
+            }
+
+            // Poll axes
+            let axes = gamepad.axes();
+            for axis_idx in 0..axes.length() {
+                let value_js: wasm_bindgen::JsValue = axes.get(axis_idx);
+                if value_js.is_null() || value_js.is_undefined() {
+                    continue;
+                }
+                let value = (value_js.as_f64().unwrap_or(0.0) * 32767.0) as i32;
+                let key = (index, axis_idx);
+                let prev_value = self.gamepad_state.axis_states.get(&key).copied().unwrap_or(0);
+
+                // Only log significant changes (deadzone + change threshold)
+                if value.abs() > 8000 && (value - prev_value).abs() > 2000 {
+                    log::info!("Gamepad axis: {} = {} (controller: {})", axis_idx, value, index);
+                    self.on_input_event();
+                }
+                self.gamepad_state.axis_states.insert(key, value);
+            }
+        }
+
+        // Check for disconnections
+        for &index in &self.gamepad_state.connected {
+            if !current_connected.contains(&index) {
+                log::info!("Gamepad disconnected (id: {})", index);
+            }
+        }
+        self.gamepad_state.connected = current_connected;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn on_input_event(&mut self) {
+        if let Some(gfx) = &mut self.gfx {
+            gfx.change_color();
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn on_input_event(&mut self) {
+        if let Ok(mut gfx_opt) = self.gfx.try_borrow_mut() {
+            if let Some(gfx) = gfx_opt.as_mut() {
+                gfx.change_color();
+            }
+        }
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
     }
 }
@@ -327,31 +497,49 @@ impl ApplicationHandler for App {
             body.style().set_property("margin", "0").unwrap();
             body.style().set_property("padding", "0").unwrap();
             body.style().set_property("overflow", "hidden").unwrap();
+            body.style().set_property("width", "100%").unwrap();
+            body.style().set_property("height", "100%").unwrap();
 
-            // Style canvas
-            let canvas = window.canvas().unwrap();
-            canvas.style().set_property("width", "100vw").unwrap();
-            canvas.style().set_property("height", "100vh").unwrap();
+            // Also style html element
+            if let Some(html) = document.document_element() {
+                let _ = html.set_attribute("style", "margin: 0; padding: 0; width: 100%; height: 100%;");
+            }
 
-            // Request initial size
+            // Get device pixel ratio for proper scaling
+            let dpr = web_window.device_pixel_ratio();
+
+            // Get window dimensions
             let width = web_window.inner_width().unwrap().as_f64().unwrap() as u32;
             let height = web_window.inner_height().unwrap().as_f64().unwrap() as u32;
-            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+
+            // Style canvas - CSS size
+            let canvas = window.canvas().unwrap();
+            canvas.style().set_property("width", &format!("{}px", width)).unwrap();
+            canvas.style().set_property("height", &format!("{}px", height)).unwrap();
+            canvas.style().set_property("display", "block").unwrap();
+
+            // Set actual canvas resolution (accounting for DPR)
+            let physical_width = (width as f64 * dpr) as u32;
+            let physical_height = (height as f64 * dpr) as u32;
+            canvas.set_width(physical_width);
+            canvas.set_height(physical_height);
+
+            // Request winit to use this size
+            let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(physical_width, physical_height));
         }
 
         self.window = Some(window.clone());
 
         #[cfg(target_arch = "wasm32")]
         {
+            let gfx_ref = self.gfx.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let gfx = GfxState::new(window.clone()).await;
                 match gfx {
                     Ok(gfx) => {
-                        // Store gfx state - we need to use a different approach for WASM
-                        // For now, just render once
                         gfx.render();
+                        *gfx_ref.borrow_mut() = Some(gfx);
                         log::info!("fastn initialized");
-                        // In WASM, the event loop handles rendering via request_redraw
                     }
                     Err(e) => log::error!("Failed to initialize graphics: {}", e),
                 }
@@ -371,9 +559,15 @@ impl ApplicationHandler for App {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.poll_gamepad_events();
+
+        // In WASM, we need to keep polling for gamepad events continuously
+        // Request a redraw to keep the event loop active
+        #[cfg(target_arch = "wasm32")]
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -382,16 +576,30 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
+                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(gfx) = &mut self.gfx {
                     gfx.resize(size.width, size.height);
+                }
+                #[cfg(target_arch = "wasm32")]
+                if let Ok(mut gfx_opt) = self.gfx.try_borrow_mut() {
+                    if let Some(gfx) = gfx_opt.as_mut() {
+                        gfx.resize(size.width, size.height);
+                    }
                 }
                 if let Some(window) = &self.window {
                     window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => {
+                #[cfg(not(target_arch = "wasm32"))]
                 if let Some(gfx) = &self.gfx {
                     gfx.render();
+                }
+                #[cfg(target_arch = "wasm32")]
+                if let Ok(gfx_opt) = self.gfx.try_borrow() {
+                    if let Some(gfx) = gfx_opt.as_ref() {
+                        gfx.render();
+                    }
                 }
             }
             // Keyboard events
@@ -406,6 +614,9 @@ impl ApplicationHandler for App {
                     },
                 ..
             } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                use winit::keyboard::{Key, NamedKey};
+
                 log::info!(
                     "Keyboard: {:?} {:?} (physical: {:?}, repeat: {})",
                     state,
@@ -413,6 +624,26 @@ impl ApplicationHandler for App {
                     physical_key,
                     repeat
                 );
+
+                // Handle quit keys (native only)
+                #[cfg(not(target_arch = "wasm32"))]
+                if state == winit::event::ElementState::Pressed {
+                    match &logical_key {
+                        // 'q' or 'Q' to quit
+                        Key::Character(c) if c == "q" || c == "Q" => {
+                            event_loop.exit();
+                            return;
+                        }
+                        // Escape to quit
+                        Key::Named(NamedKey::Escape) => {
+                            event_loop.exit();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                self.on_input_event();
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 log::info!("Modifiers: {:?}", modifiers.state());
@@ -420,14 +651,16 @@ impl ApplicationHandler for App {
             // Mouse button events
             WindowEvent::MouseInput { state, button, .. } => {
                 log::info!("Mouse button: {:?} {:?}", state, button);
+                self.on_input_event();
             }
-            // Mouse movement
+            // Mouse movement - no color change for mouse move
             WindowEvent::CursorMoved { position, .. } => {
-                log::info!("Mouse moved: ({:.1}, {:.1})", position.x, position.y);
+                log::trace!("Mouse moved: ({:.1}, {:.1})", position.x, position.y);
             }
             // Mouse scroll/wheel
             WindowEvent::MouseWheel { delta, phase, .. } => {
                 log::info!("Mouse wheel: {:?} (phase: {:?})", delta, phase);
+                self.on_input_event();
             }
             // Cursor enter/leave window
             WindowEvent::CursorEntered { .. } => {
@@ -458,6 +691,13 @@ pub fn main() {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn main() {
     env_logger::init();
+
+    // Set up Ctrl-C handler to exit gracefully
+    ctrlc::set_handler(|| {
+        log::info!("Ctrl-C received, exiting...");
+        std::process::exit(0);
+    })
+    .expect("Failed to set Ctrl-C handler");
 
     log::info!("fastn starting (native)...");
 
