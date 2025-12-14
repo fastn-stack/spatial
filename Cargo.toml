@@ -18,6 +18,9 @@ winit = "0.30"
 log = "0.4"
 pollster = "0.4"
 env_logger = "0.11"
+gltf = "1.4"
+bytemuck = { version = "1.21", features = ["derive"] }
+glam = "0.30"
 # native-only gamepad support (use with [target.'cfg(not(target_arch = "wasm32"))'.dependencies])
 sdl2 = { version = "0.38", features = ["bundled"] }
 ctrlc = "3"
@@ -38,7 +41,9 @@ web-sys = { version = "0.3", features = [
     "GamepadButton",
     "GamepadEvent",
     "Performance",
+    "Response",
 ] }
+js-sys = "0.3"
 console_log = "1.0"
 console_error_panic_hook = "0.1"
 
