@@ -305,6 +305,7 @@ impl GfxState {
             (size.width.max(1), size.height.max(1))
         };
 
+        log::info!("Creating wgpu instance...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             #[cfg(target_arch = "wasm32")]
             backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
@@ -313,13 +314,15 @@ impl GfxState {
             ..Default::default()
         });
 
+        log::info!("Creating surface...");
         let surface = instance
             .create_surface(window)
             .map_err(|e| format!("Failed to create surface: {:?}", e))?;
 
+        log::info!("Requesting adapter...");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
+                power_preference: wgpu::PowerPreference::LowPower, // Better for mobile
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
@@ -977,7 +980,18 @@ impl ApplicationHandler for App {
                         *gfx_ref.borrow_mut() = Some(gfx);
                         log::info!("fastn initialized");
                     }
-                    Err(e) => log::error!("Failed to initialize graphics: {}", e),
+                    Err(e) => {
+                        log::error!("Failed to initialize graphics: {}", e);
+                        // Show error on page for mobile debugging
+                        if let Some(document) = web_sys::window().and_then(|w| w.document()) {
+                            if let Some(body) = document.body() {
+                                let div = document.create_element("div").unwrap();
+                                div.set_attribute("style", "position:fixed;top:0;left:0;right:0;padding:20px;background:red;color:white;font-family:monospace;z-index:9999").unwrap();
+                                div.set_text_content(Some(&format!("Graphics error: {}", e)));
+                                body.append_child(&div).unwrap();
+                            }
+                        }
+                    }
                 }
             });
         }
