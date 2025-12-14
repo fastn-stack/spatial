@@ -141,13 +141,156 @@ impl GfxState {
 struct App {
     window: Option<Arc<Window>>,
     gfx: Option<GfxState>,
+    #[cfg(not(target_arch = "wasm32"))]
+    sdl_context: Option<sdl2::Sdl>,
+    #[cfg(not(target_arch = "wasm32"))]
+    event_pump: Option<sdl2::EventPump>,
+    #[cfg(not(target_arch = "wasm32"))]
+    game_controller_subsystem: Option<sdl2::GameControllerSubsystem>,
+    #[cfg(not(target_arch = "wasm32"))]
+    controllers: std::collections::HashMap<u32, sdl2::controller::GameController>,
 }
 
 impl App {
+    #[cfg(target_arch = "wasm32")]
     fn new() -> Self {
         Self {
             window: None,
             gfx: None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn new() -> Self {
+        let mut app = Self {
+            window: None,
+            gfx: None,
+            sdl_context: None,
+            event_pump: None,
+            game_controller_subsystem: None,
+            controllers: std::collections::HashMap::new(),
+        };
+        app.init_sdl();
+        app
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn init_sdl(&mut self) {
+        log::info!("Initializing SDL2 for gamepad support...");
+        match sdl2::init() {
+            Ok(sdl) => {
+                log::info!("SDL2 initialized successfully");
+                match sdl.event_pump() {
+                    Ok(pump) => self.event_pump = Some(pump),
+                    Err(e) => log::warn!("Failed to create SDL event pump: {}", e),
+                }
+                match sdl.game_controller() {
+                    Ok(gc_subsystem) => {
+                        // Open any already-connected controllers
+                        match gc_subsystem.num_joysticks() {
+                            Ok(0) => log::info!("No gamepads found at startup"),
+                            Ok(num) => {
+                                log::info!("Found {} joystick(s) at startup", num);
+                                for id in 0..num {
+                                    if gc_subsystem.is_game_controller(id) {
+                                        match gc_subsystem.open(id) {
+                                            Ok(controller) => {
+                                                log::info!(
+                                                    "Gamepad connected: {} (id: {})",
+                                                    controller.name(),
+                                                    id
+                                                );
+                                                self.controllers.insert(id, controller);
+                                            }
+                                            Err(e) => log::warn!(
+                                                "Failed to open controller {}: {}",
+                                                id,
+                                                e
+                                            ),
+                                        }
+                                    } else {
+                                        log::info!("Joystick {} is not a game controller", id);
+                                    }
+                                }
+                            }
+                            Err(e) => log::warn!("Failed to get joystick count: {}", e),
+                        }
+                        self.game_controller_subsystem = Some(gc_subsystem);
+                    }
+                    Err(e) => log::warn!("Failed to init game controller subsystem: {}", e),
+                }
+                self.sdl_context = Some(sdl);
+            }
+            Err(e) => log::warn!("Failed to init SDL2: {}", e),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn poll_gamepad_events(&mut self) {
+        let Some(event_pump) = &mut self.event_pump else {
+            return;
+        };
+        let Some(gc_subsystem) = &self.game_controller_subsystem else {
+            return;
+        };
+
+        for event in event_pump.poll_iter() {
+            use sdl2::event::Event;
+            match event {
+                Event::ControllerDeviceAdded { which, .. } => {
+                    if gc_subsystem.is_game_controller(which) {
+                        match gc_subsystem.open(which) {
+                            Ok(controller) => {
+                                log::info!(
+                                    "Gamepad connected: {} (id: {})",
+                                    controller.name(),
+                                    which
+                                );
+                                self.controllers.insert(which, controller);
+                            }
+                            Err(e) => log::warn!("Failed to open controller {}: {}", which, e),
+                        }
+                    }
+                }
+                Event::ControllerDeviceRemoved { which, .. } => {
+                    if let Some(controller) = self.controllers.remove(&which) {
+                        log::info!(
+                            "Gamepad disconnected: {} (id: {})",
+                            controller.name(),
+                            which
+                        );
+                    }
+                }
+                Event::ControllerButtonDown { which, button, .. } => {
+                    log::info!(
+                        "Gamepad button pressed: {:?} (controller: {})",
+                        button,
+                        which
+                    );
+                }
+                Event::ControllerButtonUp { which, button, .. } => {
+                    log::info!(
+                        "Gamepad button released: {:?} (controller: {})",
+                        button,
+                        which
+                    );
+                }
+                Event::ControllerAxisMotion {
+                    which, axis, value, ..
+                } => {
+                    // Only log significant axis movements (deadzone filtering)
+                    // Use i32 to avoid overflow with i16::MIN.abs()
+                    if (value as i32).abs() > 8000 {
+                        log::info!(
+                            "Gamepad axis: {:?} = {} (controller: {})",
+                            axis,
+                            value,
+                            which
+                        );
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -228,6 +371,11 @@ impl ApplicationHandler for App {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        self.poll_gamepad_events();
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => {
@@ -245,6 +393,48 @@ impl ApplicationHandler for App {
                 if let Some(gfx) = &self.gfx {
                     gfx.render();
                 }
+            }
+            // Keyboard events
+            WindowEvent::KeyboardInput {
+                event:
+                    winit::event::KeyEvent {
+                        physical_key,
+                        logical_key,
+                        state,
+                        repeat,
+                        ..
+                    },
+                ..
+            } => {
+                log::info!(
+                    "Keyboard: {:?} {:?} (physical: {:?}, repeat: {})",
+                    state,
+                    logical_key,
+                    physical_key,
+                    repeat
+                );
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                log::info!("Modifiers: {:?}", modifiers.state());
+            }
+            // Mouse button events
+            WindowEvent::MouseInput { state, button, .. } => {
+                log::info!("Mouse button: {:?} {:?}", state, button);
+            }
+            // Mouse movement
+            WindowEvent::CursorMoved { position, .. } => {
+                log::info!("Mouse moved: ({:.1}, {:.1})", position.x, position.y);
+            }
+            // Mouse scroll/wheel
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                log::info!("Mouse wheel: {:?} (phase: {:?})", delta, phase);
+            }
+            // Cursor enter/leave window
+            WindowEvent::CursorEntered { .. } => {
+                log::info!("Cursor entered window");
+            }
+            WindowEvent::CursorLeft { .. } => {
+                log::info!("Cursor left window");
             }
             _ => {}
         }
