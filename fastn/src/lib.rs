@@ -64,7 +64,7 @@ struct Camera {
 impl Camera {
     fn new(aspect: f32) -> Self {
         Self {
-            position: Vec3::new(0.0, 0.0, 5.0),
+            position: Vec3::new(0.0, 0.0, 8.0),
             yaw: 0.0,
             pitch: 0.0,
             aspect,
@@ -75,7 +75,7 @@ impl Camera {
     }
 
     fn reset(&mut self) {
-        self.position = Vec3::new(0.0, 0.0, 5.0);
+        self.position = Vec3::new(0.0, 0.0, 8.0);
         self.yaw = 0.0;
         self.pitch = 0.0;
     }
@@ -286,9 +286,24 @@ struct GfxState {
 
 impl GfxState {
     async fn new(window: Arc<Window>, glb_path: Option<&str>) -> Result<Self, String> {
-        let size = window.inner_size();
-        let width = size.width.max(1);
-        let height = size.height.max(1);
+        // Get size - on WASM, get it directly from the browser window to avoid race conditions
+        #[cfg(target_arch = "wasm32")]
+        let (width, height) = {
+            let web_window = web_sys::window().unwrap();
+            let dpr = web_window.device_pixel_ratio();
+            let w = web_window.inner_width().unwrap().as_f64().unwrap();
+            let h = web_window.inner_height().unwrap().as_f64().unwrap();
+            let width = ((w * dpr) as u32).max(1);
+            let height = ((h * dpr) as u32).max(1);
+            log::info!("Canvas size: {}x{} (dpr: {})", width, height, dpr);
+            (width, height)
+        };
+
+        #[cfg(not(target_arch = "wasm32"))]
+        let (width, height) = {
+            let size = window.inner_size();
+            (size.width.max(1), size.height.max(1))
+        };
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             #[cfg(target_arch = "wasm32")]
