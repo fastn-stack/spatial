@@ -1,0 +1,21 @@
+[workspace]
+members = ["fastn"]
+resolver = "2"
+
+
+[workspace.package]
+authors = ["Amit Upadhyay <upadhyay@gmail.com>"]
+edition = "2024"
+license = "UPL-1.0"
+repository = "https://github.com/fastn-stack/fastn"
+homepage = "https://fastn.com"
+rust-version = "1.92"
+
+
+[workspace.dependencies]
+
+[profile.release]
+strip = true
+# lto = true
+# opt-level = "z"
+# panic = "abort"
