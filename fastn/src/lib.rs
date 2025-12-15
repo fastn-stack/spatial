@@ -968,14 +968,39 @@ async fn is_immersive_vr_supported() -> bool {
     let Some(window) = web_sys::window() else {
         return false;
     };
-    let xr = window.navigator().xr();
+
+    // navigator.xr may not exist on all browsers
+    let xr = match get_xr_system() {
+        Some(xr) => xr,
+        None => {
+            log::info!("navigator.xr not available");
+            return false;
+        }
+    };
 
     // isSessionSupported returns a Promise<boolean>
     let promise = xr.is_session_supported(web_sys::XrSessionMode::ImmersiveVr);
     match wasm_bindgen_futures::JsFuture::from(promise).await {
         Ok(result) => result.as_bool().unwrap_or(false),
-        Err(_) => false,
+        Err(e) => {
+            log::info!("isSessionSupported failed: {:?}", e);
+            false
+        }
     }
+}
+
+/// Safely get XrSystem, returns None if not available
+fn get_xr_system() -> Option<web_sys::XrSystem> {
+    use wasm_bindgen::JsCast;
+    let window = web_sys::window()?;
+    let navigator = window.navigator();
+
+    // Use js_sys to check if xr property exists and is not undefined
+    let xr_value = js_sys::Reflect::get(&navigator, &wasm_bindgen::JsValue::from_str("xr")).ok()?;
+    if xr_value.is_undefined() || xr_value.is_null() {
+        return None;
+    }
+    xr_value.dyn_into::<web_sys::XrSystem>().ok()
 }
 
 /// Render a GLB file and run the application
@@ -992,11 +1017,8 @@ pub fn render_glb_with_options(path: &str, force_webgl: bool) {
     log::info!("Loading: {}", path);
     print_controls();
 
-    if is_webxr_supported() {
-        log::info!("WebXR is supported on this device");
-    } else {
-        log::info!("WebXR is NOT supported on this device");
-    }
+    // Check for actual immersive VR support (async)
+    check_webxr_vr_support();
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     let app = App::new(Some(path.to_string()), force_webgl);
