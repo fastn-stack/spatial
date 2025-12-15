@@ -12,7 +12,7 @@
 #
 # Template: Uses ./index.html.tmpl if present, otherwise uses the default
 # template from the fastn scripts directory.
-# Placeholders: {{PKG}}, {{JS_FILE}}, {{WASM_FILE}}
+# Placeholders: {{PKG}}, {{JS_FILE}}, {{WASM_FILE}}, {{WASM_HASH}}, {{JS_HASH}}
 
 set -e -x
 
@@ -64,6 +64,8 @@ fi
 sed -e "s/{{PKG}}/${PKG}/g" \
     -e "s/{{JS_FILE}}/${JS_FILE}/g" \
     -e "s/{{WASM_FILE}}/${WASM_FILE}/g" \
+    -e "s/{{WASM_HASH}}/${WASM_HASH}/g" \
+    -e "s/{{JS_HASH}}/${JS_HASH}/g" \
     "$TEMPLATE" > "$PKG/pkg/index.html"
 
 # Copy to root for easy local serving
@@ -81,3 +83,24 @@ echo "Generated files:"
 echo "  WASM: ${WASM_FILE}"
 echo "  JS:   ${JS_FILE}"
 echo "  HTML: index.html (from ${TEMPLATE})"
+echo ""
+echo "Hashes:"
+echo "  WASM: ${WASM_HASH}"
+echo "  JS:   ${JS_HASH}"
+
+# Write to GitHub Actions summary if available
+if [[ -n "$GITHUB_STEP_SUMMARY" ]]; then
+    cat >> "$GITHUB_STEP_SUMMARY" << EOF
+## Build Summary
+
+| File | Hash |
+|------|------|
+| WASM | \`${WASM_HASH}\` |
+| JS   | \`${JS_HASH}\` |
+
+**Files:**
+- \`${WASM_FILE}\`
+- \`${JS_FILE}\`
+- \`index.html\`
+EOF
+fi
