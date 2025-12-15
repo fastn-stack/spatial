@@ -1,8 +1,6 @@
-use std::sync::Arc;
-#[cfg(target_arch = "wasm32")]
 use std::cell::RefCell;
-#[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
+use std::sync::Arc;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -183,15 +181,7 @@ fn parse_glb_bytes(data: &[u8]) -> Result<(Vec<Vertex>, Vec<u32>), String> {
     Ok((vertices, indices))
 }
 
-// Load GLB file from filesystem (native only)
-#[cfg(not(target_arch = "wasm32"))]
-fn load_glb(path: &str) -> Result<(Vec<Vertex>, Vec<u32>), String> {
-    let data = std::fs::read(path).map_err(|e| format!("Failed to read file: {:?}", e))?;
-    parse_glb_bytes(&data)
-}
-
-// Fetch GLB file via HTTP (WASM only)
-#[cfg(target_arch = "wasm32")]
+// Fetch GLB file via HTTP
 async fn fetch_glb(url: &str) -> Result<Vec<u8>, String> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
@@ -286,31 +276,17 @@ struct GfxState {
 
 impl GfxState {
     async fn new(window: Arc<Window>, glb_path: Option<&str>) -> Result<Self, String> {
-        // Get size - on WASM, get it directly from the browser window to avoid race conditions
-        #[cfg(target_arch = "wasm32")]
-        let (width, height) = {
-            let web_window = web_sys::window().unwrap();
-            let dpr = web_window.device_pixel_ratio();
-            let w = web_window.inner_width().unwrap().as_f64().unwrap();
-            let h = web_window.inner_height().unwrap().as_f64().unwrap();
-            let width = ((w * dpr) as u32).max(1);
-            let height = ((h * dpr) as u32).max(1);
-            log::info!("Canvas size: {}x{} (dpr: {})", width, height, dpr);
-            (width, height)
-        };
-
-        #[cfg(not(target_arch = "wasm32"))]
-        let (width, height) = {
-            let size = window.inner_size();
-            (size.width.max(1), size.height.max(1))
-        };
+        let web_window = web_sys::window().unwrap();
+        let dpr = web_window.device_pixel_ratio();
+        let w = web_window.inner_width().unwrap().as_f64().unwrap();
+        let h = web_window.inner_height().unwrap().as_f64().unwrap();
+        let width = ((w * dpr) as u32).max(1);
+        let height = ((h * dpr) as u32).max(1);
+        log::info!("Canvas size: {}x{} (dpr: {})", width, height, dpr);
 
         log::info!("Creating wgpu instance...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            #[cfg(target_arch = "wasm32")]
             backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
-            #[cfg(not(target_arch = "wasm32"))]
-            backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
@@ -458,12 +434,7 @@ impl GfxState {
         let mesh = if let Some(path) = glb_path.filter(|p| !p.is_empty()) {
             log::info!("Loading GLB from: {}", path);
 
-            // Platform-specific loading
-            #[cfg(not(target_arch = "wasm32"))]
-            let load_result = load_glb(&path);
-
-            #[cfg(target_arch = "wasm32")]
-            let load_result = match fetch_glb(&path).await {
+            let load_result = match fetch_glb(path).await {
                 Ok(data) => parse_glb_bytes(&data),
                 Err(e) => Err(e),
             };
@@ -679,40 +650,21 @@ impl GfxState {
 // We need this trait for buffer initialization
 use wgpu::util::DeviceExt;
 
-struct App {
-    window: Option<Arc<Window>>,
-    glb_path: Option<String>,
-    #[cfg(not(target_arch = "wasm32"))]
-    gfx: Option<GfxState>,
-    #[cfg(target_arch = "wasm32")]
-    gfx: Rc<RefCell<Option<GfxState>>>,
-    input: InputState,
-    #[cfg(not(target_arch = "wasm32"))]
-    last_update: std::time::Instant,
-    #[cfg(target_arch = "wasm32")]
-    last_update_ms: f64,
-    #[cfg(not(target_arch = "wasm32"))]
-    sdl_context: Option<sdl2::Sdl>,
-    #[cfg(not(target_arch = "wasm32"))]
-    event_pump: Option<sdl2::EventPump>,
-    #[cfg(not(target_arch = "wasm32"))]
-    game_controller_subsystem: Option<sdl2::GameControllerSubsystem>,
-    #[cfg(not(target_arch = "wasm32"))]
-    controllers: std::collections::HashMap<u32, sdl2::controller::GameController>,
-    #[cfg(target_arch = "wasm32")]
-    gamepad_state: WebGamepadState,
-}
-
-#[cfg(target_arch = "wasm32")]
 #[derive(Default)]
 struct WebGamepadState {
     connected: std::collections::HashSet<u32>,
-    button_states: std::collections::HashMap<(u32, u32), bool>,
-    axis_states: std::collections::HashMap<(u32, u32), i32>,
+}
+
+struct App {
+    window: Option<Arc<Window>>,
+    glb_path: Option<String>,
+    gfx: Rc<RefCell<Option<GfxState>>>,
+    input: InputState,
+    last_update_ms: f64,
+    gamepad_state: WebGamepadState,
 }
 
 impl App {
-    #[cfg(target_arch = "wasm32")]
     fn new(glb_path: Option<String>) -> Self {
         let now_ms = web_sys::window()
             .and_then(|w| w.performance())
@@ -728,132 +680,6 @@ impl App {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn new(glb_path: Option<String>) -> Self {
-        let mut app = Self {
-            window: None,
-            glb_path,
-            gfx: None,
-            input: InputState::default(),
-            last_update: std::time::Instant::now(),
-            sdl_context: None,
-            event_pump: None,
-            game_controller_subsystem: None,
-            controllers: std::collections::HashMap::new(),
-        };
-        app.init_sdl();
-        app
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn init_sdl(&mut self) {
-        log::info!("Initializing SDL2 for gamepad support...");
-        match sdl2::init() {
-            Ok(sdl) => {
-                log::info!("SDL2 initialized successfully");
-                match sdl.event_pump() {
-                    Ok(pump) => self.event_pump = Some(pump),
-                    Err(e) => log::warn!("Failed to create SDL event pump: {}", e),
-                }
-                match sdl.game_controller() {
-                    Ok(gc_subsystem) => {
-                        match gc_subsystem.num_joysticks() {
-                            Ok(0) => log::info!("No gamepads found at startup"),
-                            Ok(num) => {
-                                log::info!("Found {} joystick(s) at startup", num);
-                                for id in 0..num {
-                                    if gc_subsystem.is_game_controller(id) {
-                                        match gc_subsystem.open(id) {
-                                            Ok(controller) => {
-                                                log::info!(
-                                                    "Gamepad connected: {} (id: {})",
-                                                    controller.name(),
-                                                    id
-                                                );
-                                                self.controllers.insert(id, controller);
-                                            }
-                                            Err(e) => log::warn!(
-                                                "Failed to open controller {}: {}",
-                                                id,
-                                                e
-                                            ),
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => log::warn!("Failed to get joystick count: {}", e),
-                        }
-                        self.game_controller_subsystem = Some(gc_subsystem);
-                    }
-                    Err(e) => log::warn!("Failed to init game controller subsystem: {}", e),
-                }
-                self.sdl_context = Some(sdl);
-            }
-            Err(e) => log::warn!("Failed to init SDL2: {}", e),
-        }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn poll_gamepad_events(&mut self) {
-        let events: Vec<_> = {
-            let Some(event_pump) = &mut self.event_pump else {
-                return;
-            };
-            event_pump.poll_iter().collect()
-        };
-
-        for event in events {
-            use sdl2::event::Event;
-            match event {
-                Event::ControllerDeviceAdded { which, .. } => {
-                    if let Some(gc_subsystem) = &self.game_controller_subsystem {
-                        if gc_subsystem.is_game_controller(which) {
-                            match gc_subsystem.open(which) {
-                                Ok(controller) => {
-                                    log::info!(
-                                        "Gamepad connected: {} (id: {})",
-                                        controller.name(),
-                                        which
-                                    );
-                                    self.controllers.insert(which, controller);
-                                }
-                                Err(e) => log::warn!("Failed to open controller {}: {}", which, e),
-                            }
-                        }
-                    }
-                }
-                Event::ControllerDeviceRemoved { which, .. } => {
-                    if let Some(controller) = self.controllers.remove(&which) {
-                        log::info!(
-                            "Gamepad disconnected: {} (id: {})",
-                            controller.name(),
-                            which
-                        );
-                    }
-                }
-                Event::ControllerAxisMotion { axis, value, .. } => {
-                    use sdl2::controller::Axis;
-                    let normalized = (value as i32) as f32 / 32767.0;
-                    // Apply deadzone
-                    let normalized = if normalized.abs() < 0.15 {
-                        0.0
-                    } else {
-                        normalized
-                    };
-                    match axis {
-                        Axis::LeftX => self.input.left_stick_x = normalized,
-                        Axis::LeftY => self.input.left_stick_y = normalized,
-                        Axis::RightX => self.input.right_stick_x = normalized,
-                        Axis::RightY => self.input.right_stick_y = normalized,
-                        _ => {}
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
     fn poll_gamepad_events(&mut self) {
         use wasm_bindgen::JsCast;
 
@@ -909,12 +735,11 @@ impl ApplicationHandler for App {
             return;
         }
 
-        let window_attrs = Window::default_attributes().with_title("fastn");
-
-        #[cfg(target_arch = "wasm32")]
         let window_attrs = {
             use winit::platform::web::WindowAttributesExtWebSys;
-            window_attrs.with_append(true)
+            Window::default_attributes()
+                .with_title("fastn")
+                .with_append(true)
         };
 
         let window = Arc::new(
@@ -923,7 +748,6 @@ impl ApplicationHandler for App {
                 .expect("Failed to create window"),
         );
 
-        #[cfg(target_arch = "wasm32")]
         {
             use winit::platform::web::WindowExtWebSys;
 
@@ -968,77 +792,34 @@ impl ApplicationHandler for App {
 
         self.window = Some(window.clone());
 
-        #[cfg(target_arch = "wasm32")]
-        {
-            let gfx_ref = self.gfx.clone();
-            let glb_path = self.glb_path.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                let gfx = GfxState::new(window.clone(), glb_path.as_deref()).await;
-                match gfx {
-                    Ok(gfx) => {
-                        gfx.render();
-                        *gfx_ref.borrow_mut() = Some(gfx);
-                        log::info!("fastn initialized");
-                    }
-                    Err(e) => {
-                        log::error!("Failed to initialize graphics: {}", e);
-                        // Show error on page for mobile debugging
-                        if let Some(document) = web_sys::window().and_then(|w| w.document()) {
-                            if let Some(body) = document.body() {
-                                let div = document.create_element("div").unwrap();
-                                div.set_attribute("style", "position:fixed;top:0;left:0;right:0;padding:20px;background:red;color:white;font-family:monospace;z-index:9999").unwrap();
-                                div.set_text_content(Some(&format!("Graphics error: {}", e)));
-                                body.append_child(&div).unwrap();
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let gfx = pollster::block_on(GfxState::new(window.clone(), self.glb_path.as_deref()));
+        let gfx_ref = self.gfx.clone();
+        let glb_path = self.glb_path.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let gfx = GfxState::new(window.clone(), glb_path.as_deref()).await;
             match gfx {
                 Ok(gfx) => {
-                    self.gfx = Some(gfx);
+                    gfx.render();
+                    *gfx_ref.borrow_mut() = Some(gfx);
                     log::info!("fastn initialized");
                 }
-                Err(e) => log::error!("Failed to initialize graphics: {}", e),
+                Err(e) => {
+                    log::error!("Failed to initialize graphics: {}", e);
+                }
             }
-        }
+        });
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         self.poll_gamepad_events();
 
-        // Calculate delta time - platform specific
-        #[cfg(not(target_arch = "wasm32"))]
-        let dt = {
-            let now = std::time::Instant::now();
-            let dt = (now - self.last_update).as_secs_f32();
-            self.last_update = now;
-            dt
-        };
+        let now_ms = web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now())
+            .unwrap_or(0.0);
+        let dt = ((now_ms - self.last_update_ms) / 1000.0) as f32;
+        self.last_update_ms = now_ms;
+        let dt = dt.min(0.1); // Cap at 100ms to avoid huge jumps
 
-        #[cfg(target_arch = "wasm32")]
-        let dt = {
-            let now_ms = web_sys::window()
-                .and_then(|w| w.performance())
-                .map(|p| p.now())
-                .unwrap_or(0.0);
-            let dt = ((now_ms - self.last_update_ms) / 1000.0) as f32;
-            self.last_update_ms = now_ms;
-            dt.min(0.1) // Cap at 100ms to avoid huge jumps
-        };
-
-        // Update and render
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(gfx) = &mut self.gfx {
-            gfx.update(&self.input, dt);
-        }
-
-        #[cfg(target_arch = "wasm32")]
         if let Ok(mut gfx_opt) = self.gfx.try_borrow_mut() {
             if let Some(gfx) = gfx_opt.as_mut() {
                 gfx.update(&self.input, dt);
@@ -1056,11 +837,6 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(gfx) = &mut self.gfx {
-                    gfx.resize(size.width, size.height);
-                }
-                #[cfg(target_arch = "wasm32")]
                 if let Ok(mut gfx_opt) = self.gfx.try_borrow_mut() {
                     if let Some(gfx) = gfx_opt.as_mut() {
                         gfx.resize(size.width, size.height);
@@ -1068,11 +844,6 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::RedrawRequested => {
-                #[cfg(not(target_arch = "wasm32"))]
-                if let Some(gfx) = &self.gfx {
-                    gfx.render();
-                }
-                #[cfg(target_arch = "wasm32")]
                 if let Ok(gfx_opt) = self.gfx.try_borrow() {
                     if let Some(gfx) = gfx_opt.as_ref() {
                         gfx.render();
@@ -1091,33 +862,10 @@ impl ApplicationHandler for App {
 
                 let pressed = state == ElementState::Pressed;
 
-                // Handle quit keys (native only)
-                #[cfg(not(target_arch = "wasm32"))]
-                if pressed {
-                    match &logical_key {
-                        Key::Character(c) if c == "q" || c == "Q" => {
-                            event_loop.exit();
-                            return;
-                        }
-                        Key::Named(NamedKey::Escape) => {
-                            event_loop.exit();
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
-
                 // Reset camera with 0
                 if pressed {
                     if let Key::Character(c) = &logical_key {
                         if c == "0" {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            if let Some(gfx) = &mut self.gfx {
-                                gfx.camera.reset();
-                                gfx.model_rotation = 0.0;
-                                log::info!("Scene reset");
-                            }
-                            #[cfg(target_arch = "wasm32")]
                             if let Ok(mut gfx_opt) = self.gfx.try_borrow_mut() {
                                 if let Some(gfx) = gfx_opt.as_mut() {
                                     gfx.camera.reset();
@@ -1164,11 +912,6 @@ fn print_controls() {
     log::info!("  Space/Shift - Move camera up/down (alt)");
     log::info!("  IJKL        - Look around (up/left/down/right)");
     log::info!("  0           - Reset scene");
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        log::info!("  Q/Escape    - Quit");
-        log::info!("  Ctrl-C      - Quit (terminal)");
-    }
     log::info!("Gamepad:");
     log::info!("  Left stick  - Move camera");
     log::info!("  Right stick - Look around");
@@ -1176,41 +919,18 @@ fn print_controls() {
 
 /// Render a GLB file and run the application
 pub fn render_glb(path: &str) {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        env_logger::init();
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+    console_log::init_with_level(log::Level::Info).expect("Failed to initialize logger");
 
-        ctrlc::set_handler(|| {
-            log::info!("Ctrl-C received, exiting...");
-            std::process::exit(0);
-        })
-        .expect("Failed to set Ctrl-C handler");
+    log::info!("fastn starting...");
+    log::info!("Loading: {}", path);
+    print_controls();
 
-        log::info!("fastn starting (native)...");
-        log::info!("Loading: {}", path);
-        print_controls();
+    let event_loop = EventLoop::new().expect("Failed to create event loop");
+    let app = App::new(Some(path.to_string()));
 
-        let event_loop = EventLoop::new().expect("Failed to create event loop");
-        let mut app = App::new(Some(path.to_string()));
-
-        event_loop.run_app(&mut app).expect("Event loop error");
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        std::panic::set_hook(Box::new(console_error_panic_hook::hook));
-        console_log::init_with_level(log::Level::Info).expect("Failed to initialize logger");
-
-        log::info!("fastn starting (wasm)...");
-        log::info!("Loading: {}", path);
-        print_controls();
-
-        let event_loop = EventLoop::new().expect("Failed to create event loop");
-        let app = App::new(Some(path.to_string()));
-
-        use winit::platform::web::EventLoopExtWebSys;
-        event_loop.spawn_app(app);
-    }
+    use winit::platform::web::EventLoopExtWebSys;
+    event_loop.spawn_app(app);
 }
 
 /// Run without loading any GLB (for testing)
