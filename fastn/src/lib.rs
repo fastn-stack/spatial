@@ -275,7 +275,7 @@ struct GfxState {
 }
 
 impl GfxState {
-    async fn new(window: Arc<Window>, glb_path: Option<&str>) -> Result<Self, String> {
+    async fn new(window: Arc<Window>, glb_path: Option<&str>, force_webgl: bool) -> Result<Self, String> {
         let web_window = web_sys::window().unwrap();
         let dpr = web_window.device_pixel_ratio();
         let w = web_window.inner_width().unwrap().as_f64().unwrap();
@@ -284,9 +284,18 @@ impl GfxState {
         let height = ((h * dpr) as u32).max(1);
         log::info!("Canvas size: {}x{} (dpr: {})", width, height, dpr);
 
+        // Select backend: WebGL if forced (for WebXR), otherwise try WebGPU first with GL fallback
+        let backends = if force_webgl {
+            log::info!("Using WebGL backend (forced for WebXR compatibility)");
+            wgpu::Backends::GL
+        } else {
+            log::info!("Using WebGPU with WebGL fallback");
+            wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL
+        };
+
         log::info!("Creating wgpu instance...");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+            backends,
             ..Default::default()
         });
 
@@ -305,10 +314,22 @@ impl GfxState {
             .await
             .map_err(|e| format!("Failed to find adapter: {:?}", e))?;
 
-        log::info!("Adapter: {:?}", adapter.get_info());
+        let adapter_info = adapter.get_info();
+        log::info!("Adapter: {:?}", adapter_info);
+        let using_webgl = adapter_info.backend == wgpu::Backend::Gl;
+
+        // Use appropriate limits based on backend
+        let required_limits = if using_webgl {
+            wgpu::Limits::downlevel_webgl2_defaults()
+        } else {
+            wgpu::Limits::default()
+        };
 
         let (device, queue): (wgpu::Device, wgpu::Queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits,
+                ..Default::default()
+            })
             .await
             .map_err(|e| format!("Failed to create device: {:?}", e))?;
 
@@ -320,11 +341,17 @@ impl GfxState {
             .copied()
             .unwrap_or(surface_caps.formats[0]);
 
+        // Clamp dimensions to device's max texture size (WebGL2 typically 2048 or 4096)
+        // Keep original dimensions for aspect ratio calculation
+        let max_dim = device.limits().max_texture_dimension_2d;
+        let surface_width = width.min(max_dim);
+        let surface_height = height.min(max_dim);
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width,
-            height,
+            width: surface_width,
+            height: surface_height,
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: surface_caps.alpha_modes[0],
             view_formats: vec![],
@@ -376,8 +403,8 @@ impl GfxState {
             }],
         });
 
-        // Create depth texture
-        let depth_texture = Self::create_depth_texture(&device, width, height);
+        // Create depth texture (use clamped dimensions)
+        let depth_texture = Self::create_depth_texture(&device, surface_width, surface_height);
 
         // Create render pipeline
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -508,11 +535,16 @@ impl GfxState {
 
     fn resize(&mut self, width: u32, height: u32) {
         if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
-            self.depth_texture = Self::create_depth_texture(&self.device, width, height);
+            // Use original dimensions for aspect ratio
             self.camera.aspect = width as f32 / height as f32;
+            // Clamp for surface/texture dimensions
+            let max_dim = self.device.limits().max_texture_dimension_2d;
+            let surface_width = width.min(max_dim);
+            let surface_height = height.min(max_dim);
+            self.config.width = surface_width;
+            self.config.height = surface_height;
+            self.surface.configure(&self.device, &self.config);
+            self.depth_texture = Self::create_depth_texture(&self.device, surface_width, surface_height);
         }
     }
 
@@ -662,10 +694,11 @@ struct App {
     input: InputState,
     last_update_ms: f64,
     gamepad_state: WebGamepadState,
+    force_webgl: bool,
 }
 
 impl App {
-    fn new(glb_path: Option<String>) -> Self {
+    fn new(glb_path: Option<String>, force_webgl: bool) -> Self {
         let now_ms = web_sys::window()
             .and_then(|w| w.performance())
             .map(|p| p.now())
@@ -673,6 +706,7 @@ impl App {
         Self {
             window: None,
             glb_path,
+            force_webgl,
             gfx: Rc::new(RefCell::new(None)),
             input: InputState::default(),
             last_update_ms: now_ms,
@@ -794,8 +828,9 @@ impl ApplicationHandler for App {
 
         let gfx_ref = self.gfx.clone();
         let glb_path = self.glb_path.clone();
+        let force_webgl = self.force_webgl;
         wasm_bindgen_futures::spawn_local(async move {
-            let gfx = GfxState::new(window.clone(), glb_path.as_deref()).await;
+            let gfx = GfxState::new(window.clone(), glb_path.as_deref(), force_webgl).await;
             match gfx {
                 Ok(gfx) => {
                     gfx.render();
@@ -917,8 +952,39 @@ fn print_controls() {
     log::info!("  Right stick - Look around");
 }
 
+/// Check if WebXR immersive-vr is supported (async check)
+/// This spawns an async task that logs the result
+pub fn check_webxr_vr_support() {
+    wasm_bindgen_futures::spawn_local(async {
+        match is_immersive_vr_supported().await {
+            true => log::info!("WebXR immersive-vr IS supported - VR mode available"),
+            false => log::info!("WebXR immersive-vr NOT supported - VR mode unavailable"),
+        }
+    });
+}
+
+/// Actually check if immersive-vr mode is supported
+async fn is_immersive_vr_supported() -> bool {
+    let Some(window) = web_sys::window() else {
+        return false;
+    };
+    let xr = window.navigator().xr();
+
+    // isSessionSupported returns a Promise<boolean>
+    let promise = xr.is_session_supported(web_sys::XrSessionMode::ImmersiveVr);
+    match wasm_bindgen_futures::JsFuture::from(promise).await {
+        Ok(result) => result.as_bool().unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
 /// Render a GLB file and run the application
 pub fn render_glb(path: &str) {
+    render_glb_with_options(path, false);
+}
+
+/// Render a GLB file with WebXR/WebGL options
+pub fn render_glb_with_options(path: &str, force_webgl: bool) {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
     console_log::init_with_level(log::Level::Info).expect("Failed to initialize logger");
 
@@ -926,8 +992,14 @@ pub fn render_glb(path: &str) {
     log::info!("Loading: {}", path);
     print_controls();
 
+    if is_webxr_supported() {
+        log::info!("WebXR is supported on this device");
+    } else {
+        log::info!("WebXR is NOT supported on this device");
+    }
+
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-    let app = App::new(Some(path.to_string()));
+    let app = App::new(Some(path.to_string()), force_webgl);
 
     use winit::platform::web::EventLoopExtWebSys;
     event_loop.spawn_app(app);

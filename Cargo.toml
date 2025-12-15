@@ -13,7 +13,7 @@ rust-version = "1.92"
 
 
 [workspace.dependencies]
-wgpu = "27.0"
+wgpu = { version = "27.0", features = ["webgl"] }
 winit = "0.30"
 log = "0.4"
 gltf = "1.4"
@@ -35,6 +35,34 @@ web-sys = { version = "0.3", features = [
     "GamepadEvent",
     "Performance",
     "Response",
+    # WebXR support (unstable APIs)
+    "XrSystem",
+    "XrSession",
+    "XrSessionMode",
+    "XrSessionInit",
+    "XrRenderState",
+    "XrRenderStateInit",
+    "XrFrame",
+    "XrViewerPose",
+    "XrView",
+    "XrViewport",
+    "XrRigidTransform",
+    "XrSpace",
+    "XrReferenceSpace",
+    "XrReferenceSpaceType",
+    "XrWebGlLayer",
+    "XrWebGlLayerInit",
+    "XrInputSource",
+    "XrInputSourceArray",
+    "XrInputSourceEvent",
+    "XrInputSourcesChangeEvent",
+    "XrHand",
+    "XrHandedness",
+    "XrTargetRayMode",
+    "XrPose",
+    "XrSessionEvent",
+    "WebGlRenderingContext",
+    "WebGl2RenderingContext",
 ] }
 js-sys = "0.3"
 console_log = "1.0"
