@@ -1,5 +1,5 @@
 [workspace]
-members = ["fastn", "fastn-shell", "examples/*"]
+members = ["fastn", "fastn-macros", "fastn-shell", "examples/*"]
 resolver = "2"
 
 

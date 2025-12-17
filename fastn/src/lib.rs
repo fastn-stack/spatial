@@ -3,27 +3,12 @@
 //! # Quick Start
 //!
 //! ```rust,ignore
-//! use fastn::{app, Event, Command, LifecycleEvent};
-//!
-//! struct MyApp;
-//!
-//! impl MyApp {
-//!     fn new() -> Self { Self }
-//!
-//!     fn handle(&mut self, event: Event) -> Vec<Command> {
-//!         match event {
-//!             Event::Lifecycle(LifecycleEvent::Init(_)) => {
-//!                 vec![Command::Asset(AssetCommand::Load {
-//!                     asset_id: "cube".into(),
-//!                     path: "cube.glb".into(),
-//!                 })]
-//!             }
-//!             _ => vec![],
-//!         }
-//!     }
+//! #[fastn::app]
+//! fn init() -> fastn::App {
+//!     let mut app = fastn::init();
+//!     app.add_volume_from_glb("cube.glb", 0);
+//!     app
 //! }
-//!
-//! app!(MyApp);
 //! ```
 //!
 //! # Build and Run
@@ -33,10 +18,17 @@
 //! fastn-shell ./target/wasm32-unknown-unknown/release/your_app.wasm
 //! ```
 
+mod app;
 mod protocol;
 
 #[doc(hidden)]
 pub mod wasm_bridge;
 
-// Re-export everything from protocol
+// Re-export the proc macro
+pub use fastn_macros::app;
+
+// Re-export App and init
+pub use app::{App, init};
+
+// Re-export protocol types for advanced usage
 pub use protocol::*;

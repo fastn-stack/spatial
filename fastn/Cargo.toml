@@ -13,3 +13,4 @@ crate-type = ["cdylib", "rlib"]
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+fastn-macros = { path = "../fastn-macros" }
