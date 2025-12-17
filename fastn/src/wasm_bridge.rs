@@ -10,10 +10,11 @@ thread_local! {
     pub static RESULT_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Store commands as JSON result
+/// Store RealityViewContent as JSON commands
 #[doc(hidden)]
-pub fn store_commands(commands: &[crate::Command]) {
-    let json = serde_json::to_string(commands).unwrap_or_else(|_| "[]".to_string());
+pub fn store_content(content: &crate::RealityViewContent) {
+    let commands = content.to_commands();
+    let json = serde_json::to_string(&commands).unwrap_or_else(|_| "[]".to_string());
     RESULT_BUFFER.with(|buf| {
         let mut buf = buf.borrow_mut();
         buf.clear();

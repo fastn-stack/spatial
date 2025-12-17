@@ -11,13 +11,14 @@ use bytemuck::{Pod, Zeroable};
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Vertex {
     position: [f32; 3],
-    color: [f32; 3],
+    normal: [f32; 3],
 }
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
 struct Uniforms {
     mvp: [[f32; 4]; 4],
+    color: [f32; 4],
 }
 
 pub struct Volume {
@@ -25,6 +26,8 @@ pub struct Volume {
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
+    pub size: f32,
+    pub color: [f32; 4],
 }
 
 pub struct Renderer {
@@ -37,6 +40,7 @@ pub struct Renderer {
     index_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
+    depth_texture: wgpu::TextureView,
     num_indices: u32,
     background_color: [f32; 4],
     volumes: Vec<Volume>,
@@ -90,6 +94,9 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
+        // Create depth texture
+        let depth_texture = create_depth_texture(&device, &config);
+
         // Create shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
@@ -108,7 +115,7 @@ impl Renderer {
             label: Some("Uniform Bind Group Layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -176,7 +183,13 @@ impl Renderer {
                 unclipped_depth: false,
                 conservative: false,
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -186,7 +199,7 @@ impl Renderer {
             cache: None,
         });
 
-        // Create cube vertices
+        // Create cube vertices with normals
         let vertices = create_cube_vertices();
         let indices = create_cube_indices();
 
@@ -212,6 +225,7 @@ impl Renderer {
             index_buffer,
             uniform_buffer,
             uniform_bind_group,
+            depth_texture,
             num_indices: indices.len() as u32,
             background_color: [0.1, 0.1, 0.2, 1.0],
             volumes: Vec::new(),
@@ -224,6 +238,7 @@ impl Renderer {
             self.config.width = width;
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
+            self.depth_texture = create_depth_texture(&self.device, &self.config);
         }
     }
 
@@ -237,13 +252,32 @@ impl Renderer {
     }
 
     pub fn create_volume(&mut self, data: &CreateVolumeData) {
+        // Extract size from primitive
+        let size = match &data.source {
+            fastn::VolumeSource::Primitive(p) => match p {
+                fastn::Primitive::Cube { size } => *size,
+                fastn::Primitive::Box { width, .. } => *width, // Use width as base
+                _ => 1.0,
+            },
+            _ => 1.0,
+        };
+
+        // Extract color from material, default to white
+        let color = data.material
+            .as_ref()
+            .and_then(|m| m.color)
+            .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+
         self.volumes.push(Volume {
             id: data.volume_id.clone(),
             position: data.transform.position,
             rotation: data.transform.rotation,
             scale: data.transform.scale,
+            size,
+            color,
         });
-        log::info!("Volume created: {} (total: {})", data.volume_id, self.volumes.len());
+        log::info!("Volume created: {} with color {:?} (total: {})",
+            data.volume_id, color, self.volumes.len());
     }
 
     pub fn render(&mut self) {
@@ -258,7 +292,7 @@ impl Renderer {
         let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 100.0);
         let view_mat = Mat4::look_at_rh(
             self.camera_position,
-            self.camera_position + Vec3::new(0.0, 0.0, -1.0),
+            Vec3::ZERO,
             Vec3::Y,
         );
 
@@ -283,7 +317,14 @@ impl Renderer {
                     },
                     depth_slice: None,
                 })],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_texture,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
@@ -295,17 +336,25 @@ impl Renderer {
 
             // Render each volume
             for volume in &self.volumes {
+                // Apply size to scale
+                let scale = Vec3::from_array(volume.scale) * volume.size;
+
                 let model = Mat4::from_scale_rotation_translation(
-                    Vec3::from_array(volume.scale),
+                    scale,
                     glam::Quat::from_array(volume.rotation),
                     Vec3::from_array(volume.position),
                 );
                 let mvp = proj * view_mat * model;
 
+                let uniforms = Uniforms {
+                    mvp: mvp.to_cols_array_2d(),
+                    color: volume.color,
+                };
+
                 self.queue.write_buffer(
                     &self.uniform_buffer,
                     0,
-                    bytemuck::cast_slice(&[Uniforms { mvp: mvp.to_cols_array_2d() }]),
+                    bytemuck::cast_slice(&[uniforms]),
                 );
 
                 render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
@@ -317,38 +366,56 @@ impl Renderer {
     }
 }
 
+fn create_depth_texture(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> wgpu::TextureView {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Depth Texture"),
+        size: wgpu::Extent3d {
+            width: config.width,
+            height: config.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    texture.create_view(&wgpu::TextureViewDescriptor::default())
+}
+
 fn create_cube_vertices() -> Vec<Vertex> {
     vec![
-        // Front face (red)
-        Vertex { position: [-0.5, -0.5,  0.5], color: [1.0, 0.0, 0.0] },
-        Vertex { position: [ 0.5, -0.5,  0.5], color: [1.0, 0.0, 0.0] },
-        Vertex { position: [ 0.5,  0.5,  0.5], color: [1.0, 0.0, 0.0] },
-        Vertex { position: [-0.5,  0.5,  0.5], color: [1.0, 0.0, 0.0] },
-        // Back face (green)
-        Vertex { position: [-0.5, -0.5, -0.5], color: [0.0, 1.0, 0.0] },
-        Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 1.0, 0.0] },
-        Vertex { position: [ 0.5,  0.5, -0.5], color: [0.0, 1.0, 0.0] },
-        Vertex { position: [ 0.5, -0.5, -0.5], color: [0.0, 1.0, 0.0] },
-        // Top face (blue)
-        Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 0.0, 1.0] },
-        Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 0.0, 1.0] },
-        Vertex { position: [ 0.5,  0.5,  0.5], color: [0.0, 0.0, 1.0] },
-        Vertex { position: [ 0.5,  0.5, -0.5], color: [0.0, 0.0, 1.0] },
-        // Bottom face (yellow)
-        Vertex { position: [-0.5, -0.5, -0.5], color: [1.0, 1.0, 0.0] },
-        Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 1.0, 0.0] },
-        Vertex { position: [ 0.5, -0.5,  0.5], color: [1.0, 1.0, 0.0] },
-        Vertex { position: [-0.5, -0.5,  0.5], color: [1.0, 1.0, 0.0] },
-        // Right face (magenta)
-        Vertex { position: [ 0.5, -0.5, -0.5], color: [1.0, 0.0, 1.0] },
-        Vertex { position: [ 0.5,  0.5, -0.5], color: [1.0, 0.0, 1.0] },
-        Vertex { position: [ 0.5,  0.5,  0.5], color: [1.0, 0.0, 1.0] },
-        Vertex { position: [ 0.5, -0.5,  0.5], color: [1.0, 0.0, 1.0] },
-        // Left face (cyan)
-        Vertex { position: [-0.5, -0.5, -0.5], color: [0.0, 1.0, 1.0] },
-        Vertex { position: [-0.5, -0.5,  0.5], color: [0.0, 1.0, 1.0] },
-        Vertex { position: [-0.5,  0.5,  0.5], color: [0.0, 1.0, 1.0] },
-        Vertex { position: [-0.5,  0.5, -0.5], color: [0.0, 1.0, 1.0] },
+        // Front face (+Z)
+        Vertex { position: [-0.5, -0.5,  0.5], normal: [0.0, 0.0, 1.0] },
+        Vertex { position: [ 0.5, -0.5,  0.5], normal: [0.0, 0.0, 1.0] },
+        Vertex { position: [ 0.5,  0.5,  0.5], normal: [0.0, 0.0, 1.0] },
+        Vertex { position: [-0.5,  0.5,  0.5], normal: [0.0, 0.0, 1.0] },
+        // Back face (-Z)
+        Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0] },
+        Vertex { position: [-0.5,  0.5, -0.5], normal: [0.0, 0.0, -1.0] },
+        Vertex { position: [ 0.5,  0.5, -0.5], normal: [0.0, 0.0, -1.0] },
+        Vertex { position: [ 0.5, -0.5, -0.5], normal: [0.0, 0.0, -1.0] },
+        // Top face (+Y)
+        Vertex { position: [-0.5,  0.5, -0.5], normal: [0.0, 1.0, 0.0] },
+        Vertex { position: [-0.5,  0.5,  0.5], normal: [0.0, 1.0, 0.0] },
+        Vertex { position: [ 0.5,  0.5,  0.5], normal: [0.0, 1.0, 0.0] },
+        Vertex { position: [ 0.5,  0.5, -0.5], normal: [0.0, 1.0, 0.0] },
+        // Bottom face (-Y)
+        Vertex { position: [-0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0] },
+        Vertex { position: [ 0.5, -0.5, -0.5], normal: [0.0, -1.0, 0.0] },
+        Vertex { position: [ 0.5, -0.5,  0.5], normal: [0.0, -1.0, 0.0] },
+        Vertex { position: [-0.5, -0.5,  0.5], normal: [0.0, -1.0, 0.0] },
+        // Right face (+X)
+        Vertex { position: [ 0.5, -0.5, -0.5], normal: [1.0, 0.0, 0.0] },
+        Vertex { position: [ 0.5,  0.5, -0.5], normal: [1.0, 0.0, 0.0] },
+        Vertex { position: [ 0.5,  0.5,  0.5], normal: [1.0, 0.0, 0.0] },
+        Vertex { position: [ 0.5, -0.5,  0.5], normal: [1.0, 0.0, 0.0] },
+        // Left face (-X)
+        Vertex { position: [-0.5, -0.5, -0.5], normal: [-1.0, 0.0, 0.0] },
+        Vertex { position: [-0.5, -0.5,  0.5], normal: [-1.0, 0.0, 0.0] },
+        Vertex { position: [-0.5,  0.5,  0.5], normal: [-1.0, 0.0, 0.0] },
+        Vertex { position: [-0.5,  0.5, -0.5], normal: [-1.0, 0.0, 0.0] },
     ]
 }
 

@@ -75,21 +75,7 @@ impl App {
                 }
             }
             Command::Asset(asset_cmd) => {
-                use fastn::AssetCommand;
-                match asset_cmd {
-                    AssetCommand::Load { asset_id, path } => {
-                        log::info!("Loading asset: {} from {}", asset_id, path);
-                        // TODO: Actually load the GLB file
-                        // For now, simulate successful load
-                        // The simplified API doesn't need to send events back
-                    }
-                    AssetCommand::Unload { asset_id } => {
-                        log::info!("Unloading asset: {}", asset_id);
-                    }
-                    AssetCommand::Cancel { asset_id } => {
-                        log::info!("Cancel loading asset: {}", asset_id);
-                    }
-                }
+                log::debug!("Asset command (not implemented): {:?}", asset_cmd);
             }
             Command::Scene(scene_cmd) => {
                 use fastn::SceneCommand;

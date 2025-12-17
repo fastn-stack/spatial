@@ -2,6 +2,7 @@
 
 struct Uniforms {
     mvp: mat4x4<f32>,
+    color: vec4<f32>,
 };
 
 @group(0) @binding(0)
@@ -9,23 +10,29 @@ var<uniform> uniforms: Uniforms;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) color: vec3<f32>,
+    @location(1) normal: vec3<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) color: vec3<f32>,
+    @location(0) normal: vec3<f32>,
 };
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = uniforms.mvp * vec4<f32>(in.position, 1.0);
-    out.color = in.color;
+    out.normal = in.normal;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    // Simple directional lighting
+    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
+    let ambient = 0.3;
+    let diffuse = max(dot(normalize(in.normal), light_dir), 0.0);
+    let brightness = ambient + diffuse * 0.7;
+
+    return vec4<f32>(uniforms.color.rgb * brightness, uniforms.color.a);
 }
