@@ -967,61 +967,6 @@ pub enum LogLevel {
     Error,
 }
 
-// ============================================================================
-// CORE TRAIT
-// ============================================================================
-
-/// Trait that the application implements
-pub trait Core {
-    /// Handle an event from the shell
-    /// Returns commands for the shell to execute
-    fn handle(&mut self, event: Event) -> Vec<Command>;
-}
-
-// ============================================================================
-// HELPER TRAITS FOR MODULAR HANDLERS
-// ============================================================================
-
-/// Handler for lifecycle events
-pub trait LifecycleHandler {
-    fn handle_lifecycle(&mut self, event: LifecycleEvent) -> Vec<Command>;
-}
-
-/// Handler for input events
-pub trait InputHandler {
-    fn handle_input(&mut self, event: InputEvent) -> Vec<Command>;
-}
-
-/// Handler for XR events
-pub trait XrHandler {
-    fn handle_xr(&mut self, event: XrEvent) -> Vec<Command>;
-}
-
-/// Handler for asset events
-pub trait AssetHandler {
-    fn handle_asset(&mut self, event: AssetEvent) -> Vec<Command>;
-}
-
-/// Handler for scene events
-pub trait SceneHandler {
-    fn handle_scene(&mut self, event: SceneEvent) -> Vec<Command>;
-}
-
-/// Handler for network events
-pub trait NetworkHandler {
-    fn handle_network(&mut self, event: NetworkEvent) -> Vec<Command>;
-}
-
-/// Handler for media events
-pub trait MediaHandler {
-    fn handle_media(&mut self, event: MediaEvent) -> Vec<Command>;
-}
-
-/// Handler for timer events
-pub trait TimerHandler {
-    fn handle_timer(&mut self, event: TimerEvent) -> Vec<Command>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
