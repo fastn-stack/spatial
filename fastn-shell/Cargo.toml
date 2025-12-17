@@ -1,0 +1,36 @@
+[package]
+name = "fastn-shell"
+version = "0.1.0"
+edition = "2024"
+description = "Native shell for spatial/XR applications using wgpu + wasmtime"
+license = "MIT OR Apache-2.0"
+
+[[bin]]
+name = "fastn-shell"
+path = "src/main.rs"
+
+[dependencies]
+# WASM runtime
+wasmtime.workspace = true
+
+# Rendering
+wgpu.workspace = true
+winit.workspace = true
+
+# Asset loading
+gltf.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+
+# Protocol types (for deserializing commands)
+fastn = { path = "../fastn" }
+
+# Utilities
+log.workspace = true
+env_logger.workspace = true
+pollster.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+# Gamepad support
+gilrs.workspace = true

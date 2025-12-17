@@ -2,20 +2,14 @@
 name = "fastn"
 version = "0.1.0"
 edition = "2024"
+description = "Build spatial/XR applications in Rust"
+license = "MIT OR Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wgpu.workspace = true
-winit.workspace = true
+# Core dependencies (always needed)
 log.workspace = true
-gltf.workspace = true
-bytemuck.workspace = true
-glam.workspace = true
-wasm-bindgen.workspace = true
-wasm-bindgen-futures.workspace = true
-web-sys.workspace = true
-js-sys.workspace = true
-console_log.workspace = true
-console_error_panic_hook.workspace = true
+serde.workspace = true
+serde_json.workspace = true
