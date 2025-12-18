@@ -44,6 +44,11 @@ pub fn app(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
 
         #[unsafe(no_mangle)]
+        pub extern "C" fn on_event(event_ptr: *const u8, event_len: usize) -> *const u8 {
+            fastn::wasm_bridge::on_event(event_ptr, event_len)
+        }
+
+        #[unsafe(no_mangle)]
         pub extern "C" fn alloc(size: usize) -> *mut u8 {
             fastn::wasm_bridge::alloc(size)
         }

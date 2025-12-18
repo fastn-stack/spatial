@@ -33,4 +33,4 @@ serde.workspace = true
 serde_json.workspace = true
 
 # Gamepad support
-gilrs.workspace = true
+sdl2.workspace = true

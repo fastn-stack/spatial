@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use winit::window::Window;
 use wgpu::util::DeviceExt;
-use fastn::{CreateVolumeData, BackgroundData};
+use fastn::{CreateVolumeData, BackgroundData, CameraData};
 use glam::{Mat4, Vec3};
 use bytemuck::{Pod, Zeroable};
 
@@ -30,6 +30,11 @@ pub struct Volume {
     pub color: [f32; 4],
 }
 
+// Default camera settings
+const DEFAULT_CAMERA_POSITION: Vec3 = Vec3::new(0.0, 1.6, 3.0);
+const DEFAULT_CAMERA_YAW: f32 = -std::f32::consts::FRAC_PI_2; // Facing -Z (towards origin)
+const DEFAULT_CAMERA_PITCH: f32 = -0.5; // Looking slightly down at origin
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -45,6 +50,8 @@ pub struct Renderer {
     background_color: [f32; 4],
     volumes: Vec<Volume>,
     camera_position: Vec3,
+    camera_yaw: f32,   // Rotation around Y axis (left/right)
+    camera_pitch: f32, // Rotation around X axis (up/down)
 }
 
 impl Renderer {
@@ -229,7 +236,9 @@ impl Renderer {
             num_indices: indices.len() as u32,
             background_color: [0.1, 0.1, 0.2, 1.0],
             volumes: Vec::new(),
-            camera_position: Vec3::new(0.0, 1.6, 3.0),
+            camera_position: DEFAULT_CAMERA_POSITION,
+            camera_yaw: DEFAULT_CAMERA_YAW,
+            camera_pitch: DEFAULT_CAMERA_PITCH,
         }
     }
 
@@ -280,6 +289,20 @@ impl Renderer {
             data.volume_id, color, self.volumes.len());
     }
 
+    /// Set camera from CameraData (position + target)
+    /// Computes yaw and pitch from the direction vector
+    pub fn set_camera(&mut self, camera: &CameraData) {
+        self.camera_position = Vec3::from_array(camera.position);
+
+        // Compute direction from position to target
+        let target = Vec3::from_array(camera.target);
+        let direction = (target - self.camera_position).normalize();
+
+        // Extract yaw (rotation around Y) and pitch (rotation around X)
+        self.camera_yaw = direction.z.atan2(direction.x);
+        self.camera_pitch = direction.y.asin();
+    }
+
     pub fn render(&mut self) {
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
@@ -290,9 +313,18 @@ impl Renderer {
 
         let aspect = self.config.width as f32 / self.config.height as f32;
         let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 100.0);
+
+        // Calculate camera direction from yaw and pitch
+        let direction = Vec3::new(
+            self.camera_yaw.cos() * self.camera_pitch.cos(),
+            self.camera_pitch.sin(),
+            self.camera_yaw.sin() * self.camera_pitch.cos(),
+        );
+        let target = self.camera_position + direction;
+
         let view_mat = Mat4::look_at_rh(
             self.camera_position,
-            Vec3::ZERO,
+            target,
             Vec3::Y,
         );
 

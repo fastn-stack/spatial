@@ -31,6 +31,7 @@
 //! | `RealityViewContent` | `RealityViewContent` |
 //! | `content.add(entity)` | `content.add(entity)` |
 
+mod camera;
 mod entity;
 mod material;
 mod mesh;
@@ -39,6 +40,9 @@ mod reality_view;
 
 #[doc(hidden)]
 pub mod wasm_bridge;
+
+// Camera controller for default input handling
+pub use camera::CameraController;
 
 // Re-export the proc macro
 pub use fastn_macros::app;

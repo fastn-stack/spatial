@@ -2,16 +2,19 @@
 //!
 //! The WASM module must export:
 //! - `init_core() -> commands_json_ptr` - Initialize and return initial commands
+//! - `on_event(event_ptr, event_len) -> commands_json_ptr` - Process event and return commands
 //! - `alloc(size) -> ptr` - Allocate memory in WASM
 //! - `dealloc(ptr, size)` - Deallocate memory in WASM
 //! - `get_result_len() -> len` - Get length of result buffer
 
-use fastn::Command;
+use fastn::{Command, Event};
 use wasmtime::*;
 
 pub struct WasmCore {
     store: Store<()>,
     memory: Memory,
+    alloc: TypedFunc<i32, i32>,
+    on_event: TypedFunc<(i32, i32), i32>,
     get_result_len: TypedFunc<(), i32>,
 }
 
@@ -29,6 +32,12 @@ impl WasmCore {
 
         let init_core = instance
             .get_typed_func::<(), i32>(&mut store, "init_core")?;
+
+        let alloc = instance
+            .get_typed_func::<i32, i32>(&mut store, "alloc")?;
+
+        let on_event = instance
+            .get_typed_func::<(i32, i32), i32>(&mut store, "on_event")?;
 
         let get_result_len = instance
             .get_typed_func::<(), i32>(&mut store, "get_result_len")?;
@@ -52,9 +61,42 @@ impl WasmCore {
         let core = Self {
             store,
             memory,
+            alloc,
+            on_event,
             get_result_len,
         };
 
         Ok((core, commands))
+    }
+
+    /// Send an event to the WASM core and get back commands
+    pub fn send_event(&mut self, event: &Event) -> Result<Vec<Command>, Box<dyn std::error::Error>> {
+        // Serialize the event to JSON
+        let event_json = serde_json::to_string(event)?;
+        let event_bytes = event_json.as_bytes();
+        let event_len = event_bytes.len() as i32;
+
+        // Allocate memory in WASM for the event
+        let event_ptr = self.alloc.call(&mut self.store, event_len)?;
+
+        // Write the event JSON to WASM memory
+        self.memory.data_mut(&mut self.store)[event_ptr as usize..(event_ptr as usize + event_len as usize)]
+            .copy_from_slice(event_bytes);
+
+        // Call on_event
+        let result_ptr = self.on_event.call(&mut self.store, (event_ptr, event_len))?;
+        let result_len = self.get_result_len.call(&mut self.store, ())?;
+
+        // Read the commands from WASM memory
+        let commands = if result_len > 0 {
+            let mem_data = self.memory.data(&self.store);
+            let result_bytes = &mem_data[result_ptr as usize..(result_ptr as usize + result_len as usize)];
+            let result_json = std::str::from_utf8(result_bytes)?;
+            serde_json::from_str::<Vec<Command>>(result_json)?
+        } else {
+            vec![]
+        };
+
+        Ok(commands)
     }
 }
