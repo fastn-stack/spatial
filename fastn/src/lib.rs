@@ -26,6 +26,7 @@
 //! |------------------|--------------|
 //! | `ModelEntity` | `ModelEntity` |
 //! | `Entity` | `Entity` |
+//! | `Entity.load(named:)` | `Entity::load(path)` |
 //! | `MeshResource.generateBox(size:)` | `MeshResource::generate_box(size)` |
 //! | `SimpleMaterial` | `SimpleMaterial` |
 //! | `RealityViewContent` | `RealityViewContent` |
@@ -48,7 +49,7 @@ pub use camera::CameraController;
 pub use fastn_macros::app;
 
 // Entity types (like RealityKit)
-pub use entity::{Entity, ModelEntity, EntityKind};
+pub use entity::{Entity, ModelEntity, EntityKind, LoadedEntity};
 
 // Mesh generation (like MeshResource)
 pub use mesh::MeshResource;

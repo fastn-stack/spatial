@@ -6,6 +6,7 @@ use wgpu::util::DeviceExt;
 use fastn::{CreateVolumeData, BackgroundData, CameraData};
 use glam::{Mat4, Vec3};
 use bytemuck::{Pod, Zeroable};
+use crate::asset_loader::AssetManager;
 
 #[repr(C)]
 #[derive(Copy, Clone, Pod, Zeroable)]
@@ -21,13 +22,25 @@ struct Uniforms {
     color: [f32; 4],
 }
 
+/// Mesh buffers for a volume (either shared or custom)
+pub enum VolumeMesh {
+    /// Use the shared primitive cube mesh
+    Primitive { size: f32 },
+    /// Use a custom loaded mesh
+    Custom {
+        vertex_buffer: wgpu::Buffer,
+        index_buffer: wgpu::Buffer,
+        num_indices: u32,
+    },
+}
+
 pub struct Volume {
     pub id: String,
     pub position: [f32; 3],
     pub rotation: [f32; 4],
     pub scale: [f32; 3],
-    pub size: f32,
     pub color: [f32; 4],
+    pub mesh: VolumeMesh,
 }
 
 // Default camera settings
@@ -260,30 +273,76 @@ impl Renderer {
         }
     }
 
-    pub fn create_volume(&mut self, data: &CreateVolumeData) {
-        // Extract size from primitive
-        let size = match &data.source {
-            fastn::VolumeSource::Primitive(p) => match p {
-                fastn::Primitive::Cube { size } => *size,
-                fastn::Primitive::Box { width, .. } => *width, // Use width as base
-                _ => 1.0,
-            },
-            _ => 1.0,
-        };
+    pub fn create_volume(&mut self, data: &CreateVolumeData, asset_manager: &AssetManager) {
+        // Determine mesh type and create appropriate volume
+        let (mesh, color) = match &data.source {
+            fastn::VolumeSource::Primitive(p) => {
+                let size = match p {
+                    fastn::Primitive::Cube { size } => *size,
+                    fastn::Primitive::Box { width, .. } => *width,
+                    _ => 1.0,
+                };
+                let color = data.material
+                    .as_ref()
+                    .and_then(|m| m.color)
+                    .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                (VolumeMesh::Primitive { size }, color)
+            }
+            fastn::VolumeSource::Asset { asset_id, .. } => {
+                if let Some(loaded_mesh) = asset_manager.get_mesh(asset_id) {
+                    // Create GPU buffers from loaded mesh
+                    let vertices: Vec<Vertex> = loaded_mesh.vertices.iter()
+                        .zip(loaded_mesh.normals.iter())
+                        .map(|(pos, norm)| Vertex {
+                            position: *pos,
+                            normal: *norm,
+                        })
+                        .collect();
 
-        // Extract color from material, default to white
-        let color = data.material
-            .as_ref()
-            .and_then(|m| m.color)
-            .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+                    let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("Vertex Buffer {}", data.volume_id)),
+                        contents: bytemuck::cast_slice(&vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+
+                    let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(&format!("Index Buffer {}", data.volume_id)),
+                        contents: bytemuck::cast_slice(&loaded_mesh.indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+
+                    // Use color from GLB material, or override from command
+                    let color = data.material
+                        .as_ref()
+                        .and_then(|m| m.color)
+                        .unwrap_or(loaded_mesh.color);
+
+                    log::info!("Created custom mesh buffers for {} ({} vertices, {} indices)",
+                        data.volume_id, vertices.len(), loaded_mesh.indices.len());
+
+                    (VolumeMesh::Custom {
+                        vertex_buffer,
+                        index_buffer,
+                        num_indices: loaded_mesh.indices.len() as u32,
+                    }, color)
+                } else {
+                    log::warn!("Asset {} not found, using placeholder cube", asset_id);
+                    let color = data.material
+                        .as_ref()
+                        .and_then(|m| m.color)
+                        .unwrap_or([1.0, 0.5, 0.5, 1.0]); // Pink = missing asset
+                    (VolumeMesh::Primitive { size: 1.0 }, color)
+                }
+            }
+        };
 
         self.volumes.push(Volume {
             id: data.volume_id.clone(),
             position: data.transform.position,
             rotation: data.transform.rotation,
             scale: data.transform.scale,
-            size,
             color,
+            mesh,
         });
         log::info!("Volume created: {} with color {:?} (total: {})",
             data.volume_id, color, self.volumes.len());
@@ -362,14 +421,15 @@ impl Renderer {
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
 
             // Render each volume
             for volume in &self.volumes {
-                // Apply size to scale
-                let scale = Vec3::from_array(volume.scale) * volume.size;
+                // Compute scale based on mesh type
+                let scale = match &volume.mesh {
+                    VolumeMesh::Primitive { size } => Vec3::from_array(volume.scale) * *size,
+                    VolumeMesh::Custom { .. } => Vec3::from_array(volume.scale),
+                };
 
                 let model = Mat4::from_scale_rotation_translation(
                     scale,
@@ -389,7 +449,19 @@ impl Renderer {
                     bytemuck::cast_slice(&[uniforms]),
                 );
 
-                render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+                // Set buffers and draw based on mesh type
+                match &volume.mesh {
+                    VolumeMesh::Primitive { .. } => {
+                        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                        render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+                    }
+                    VolumeMesh::Custom { vertex_buffer, index_buffer, num_indices } => {
+                        render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                        render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        render_pass.draw_indexed(0..*num_indices, 0, 0..1);
+                    }
+                }
             }
         }
 

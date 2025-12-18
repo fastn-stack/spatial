@@ -682,6 +682,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "cube-glb"
+version = "0.1.0"
+dependencies = [
+ "fastn",
+]
+
+[[package]]
 name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

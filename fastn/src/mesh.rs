@@ -1,20 +1,26 @@
-//! MeshResource - Geometry generation
+//! MeshResource - Geometry generation for procedural primitives
 //!
-//! Matches RealityKit's MeshResource API.
+//! Matches RealityKit's MeshResource API for procedural geometry.
 //!
 //! # Example
 //!
 //! ```rust,ignore
 //! use fastn::MeshResource;
 //!
+//! // Procedural geometry
 //! let box_mesh = MeshResource::generate_box(0.5);
 //! let sphere_mesh = MeshResource::generate_sphere(0.3);
-//! let plane_mesh = MeshResource::generate_plane(width: 1.0, depth: 1.0);
+//! let plane_mesh = MeshResource::generate_plane(1.0, 1.0);
 //! ```
+//!
+//! For loading meshes from files (GLB, USDZ), use `Entity::load()` instead.
 
-/// Mesh geometry resource.
+/// Mesh geometry resource for procedural primitives.
 ///
-/// Equivalent to RealityKit's `MeshResource`.
+/// Equivalent to RealityKit's `MeshResource` for generated geometry.
+///
+/// For loading 3D models from files, use `Entity::load()` which returns
+/// a `LoadedEntity` that handles async asset loading.
 #[derive(Debug, Clone)]
 pub enum MeshResource {
     Box { size: f32 },

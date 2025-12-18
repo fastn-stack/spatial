@@ -7,6 +7,7 @@
 //! 4. Executes Commands returned by the WASM core
 //! 5. Handles gamepad input via SDL2
 
+mod asset_loader;
 mod gamepad;
 mod renderer;
 mod wasm_runtime;
@@ -27,6 +28,7 @@ use fastn::{
     LifecycleEvent, FrameEvent,
 };
 
+use asset_loader::AssetManager;
 use gamepad::GamepadManager;
 use renderer::Renderer;
 use wasm_runtime::WasmCore;
@@ -46,6 +48,8 @@ struct App {
     last_gamepad_log: std::time::Instant,
     // Frame counter
     frame_count: u64,
+    // Asset manager for loading GLB/glTF files
+    asset_manager: AssetManager,
 }
 
 impl App {
@@ -62,6 +66,13 @@ impl App {
             }
         };
 
+        // Initialize asset manager with base path from WASM file directory
+        let mut asset_manager = AssetManager::new();
+        if let Some(parent) = std::path::Path::new(&wasm_path).parent() {
+            asset_manager.set_base_path(parent);
+            log::info!("Asset base path: {:?}", parent);
+        }
+
         Self {
             window: None,
             renderer: None,
@@ -73,6 +84,7 @@ impl App {
             gamepad,
             last_gamepad_log: std::time::Instant::now(),
             frame_count: 0,
+            asset_manager,
         }
     }
 
@@ -120,7 +132,18 @@ impl App {
                 }
             }
             Command::Asset(asset_cmd) => {
-                log::debug!("Asset command (not implemented): {:?}", asset_cmd);
+                use fastn::AssetCommand;
+                match asset_cmd {
+                    AssetCommand::Load { asset_id, path } => {
+                        log::info!("Loading asset: {} from {}", asset_id, path);
+                        if let Err(e) = self.asset_manager.load(&asset_id, &path) {
+                            log::error!("Failed to load asset {}: {}", asset_id, e);
+                        }
+                    }
+                    _ => {
+                        log::debug!("Unhandled asset command: {:?}", asset_cmd);
+                    }
+                }
             }
             Command::Scene(scene_cmd) => {
                 use fastn::SceneCommand;
@@ -128,7 +151,7 @@ impl App {
                     SceneCommand::CreateVolume(data) => {
                         log::info!("Creating volume: {} at {:?}", data.volume_id, data.transform.position);
                         if let Some(renderer) = &mut self.renderer {
-                            renderer.create_volume(&data);
+                            renderer.create_volume(&data, &self.asset_manager);
                         }
                     }
                     SceneCommand::SetTransform(data) => {

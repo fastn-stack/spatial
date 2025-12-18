@@ -70,6 +70,14 @@ impl RealityViewContent {
                     Self::collect_commands(child, commands);
                 }
             }
+            EntityKind::LoadedEntity(l) => {
+                // First emit asset load command, then create volume command
+                commands.push(l.to_load_command());
+                commands.push(l.to_create_command());
+                for child in l.children() {
+                    Self::collect_commands(child, commands);
+                }
+            }
         }
     }
 }

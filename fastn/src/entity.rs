@@ -19,10 +19,15 @@
 //! );
 //! cube.set_position([0.0, 1.0, -2.0]);
 //! parent.add_child(cube);
+//!
+//! // Load entity from file (GLB, USDZ)
+//! let robot = Entity::load("robot.glb")
+//!     .position(0.0, 0.0, -2.0)
+//!     .scale(0.5);
 //! ```
 
 use crate::{MeshResource, SimpleMaterial};
-use crate::{Command, SceneCommand, CreateVolumeData, Transform, VolumeSource, Primitive};
+use crate::{Command, SceneCommand, CreateVolumeData, AssetCommand, Transform, VolumeSource, Primitive};
 
 /// Base entity - a node in the scene hierarchy.
 ///
@@ -41,6 +46,7 @@ pub struct Entity {
 pub enum EntityKind {
     Entity(Entity),
     ModelEntity(ModelEntity),
+    LoadedEntity(LoadedEntity),
 }
 
 impl Entity {
@@ -49,6 +55,27 @@ impl Entity {
     /// Equivalent to `Entity()` in RealityKit.
     pub fn new() -> Self {
         Self::with_id(generate_id())
+    }
+
+    /// Load an entity from a 3D model file.
+    ///
+    /// Supported formats: GLB, glTF, USDZ, USD
+    ///
+    /// Equivalent to `Entity.load(named:)` in RealityKit.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Swift equivalent:
+    /// // let robot = try await Entity.load(named: "robot.usdz")
+    /// // robot.position = [0, 0, -2]
+    ///
+    /// let robot = Entity::load("robot.glb")
+    ///     .position(0.0, 0.0, -2.0)
+    ///     .scale(0.5);
+    /// content.add(robot);
+    /// ```
+    pub fn load(path: impl Into<String>) -> LoadedEntity {
+        LoadedEntity::new(path)
     }
 
     /// Create a new entity with a specific ID.
@@ -247,6 +274,143 @@ impl ModelEntity {
     }
 }
 
+/// Entity loaded from a 3D model file.
+///
+/// Created via `Entity::load()`. The shell handles async loading.
+///
+/// Equivalent to entities loaded via `Entity.load(named:)` in RealityKit.
+///
+/// # Example
+/// ```rust,ignore
+/// let robot = Entity::load("robot.glb")
+///     .position(0.0, 0.0, -2.0)
+///     .scale(0.5)
+///     .with_material(SimpleMaterial::new().color(0.2, 0.8, 0.2));
+/// content.add(robot);
+/// ```
+#[derive(Debug, Clone)]
+pub struct LoadedEntity {
+    id: String,
+    asset_id: String,
+    path: String,
+    mesh_index: Option<u32>,
+    position: [f32; 3],
+    orientation: [f32; 4],
+    scale: [f32; 3],
+    material_override: Option<SimpleMaterial>,
+    children: Vec<EntityKind>,
+}
+
+impl LoadedEntity {
+    /// Create a new loaded entity from a file path.
+    pub fn new(path: impl Into<String>) -> Self {
+        let path = path.into();
+        let id = generate_id();
+        // Asset ID is derived from path for deduplication
+        let asset_id = format!("asset:{}", path);
+        Self {
+            id,
+            asset_id,
+            path,
+            mesh_index: None,
+            position: [0.0, 0.0, 0.0],
+            orientation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+            material_override: None,
+            children: Vec::new(),
+        }
+    }
+
+    /// Get the entity's ID.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Get the asset path.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Get the asset ID (used for deduplication).
+    pub fn asset_id(&self) -> &str {
+        &self.asset_id
+    }
+
+    /// Load a specific mesh from a multi-mesh file.
+    pub fn mesh(mut self, index: u32) -> Self {
+        self.mesh_index = Some(index);
+        self
+    }
+
+    /// Set the position in parent's coordinate space.
+    pub fn set_position(&mut self, position: [f32; 3]) {
+        self.position = position;
+    }
+
+    /// Set position with individual components (builder style).
+    pub fn position(mut self, x: f32, y: f32, z: f32) -> Self {
+        self.position = [x, y, z];
+        self
+    }
+
+    /// Set the orientation as a quaternion.
+    pub fn set_orientation(&mut self, orientation: [f32; 4]) {
+        self.orientation = orientation;
+    }
+
+    /// Set the scale.
+    pub fn set_scale(&mut self, scale: [f32; 3]) {
+        self.scale = scale;
+    }
+
+    /// Set uniform scale (builder style).
+    pub fn scale(mut self, s: f32) -> Self {
+        self.scale = [s, s, s];
+        self
+    }
+
+    /// Override the material from the file.
+    pub fn with_material(mut self, material: SimpleMaterial) -> Self {
+        self.material_override = Some(material);
+        self
+    }
+
+    /// Add a child entity.
+    pub fn add_child(&mut self, child: impl Into<EntityKind>) {
+        self.children.push(child.into());
+    }
+
+    /// Get children.
+    pub fn children(&self) -> &[EntityKind] {
+        &self.children
+    }
+
+    /// Generate the asset load command.
+    pub(crate) fn to_load_command(&self) -> Command {
+        Command::Asset(AssetCommand::Load {
+            asset_id: self.asset_id.clone(),
+            path: self.path.clone(),
+        })
+    }
+
+    /// Generate the create volume command.
+    pub(crate) fn to_create_command(&self) -> Command {
+        Command::Scene(SceneCommand::CreateVolume(CreateVolumeData {
+            volume_id: self.id.clone(),
+            source: VolumeSource::Asset {
+                asset_id: self.asset_id.clone(),
+                mesh_index: self.mesh_index,
+            },
+            transform: Transform {
+                position: self.position,
+                rotation: self.orientation,
+                scale: self.scale,
+            },
+            material: self.material_override.as_ref().map(|m| m.to_override()),
+        }))
+    }
+}
+
 // Conversions to EntityKind
 impl From<Entity> for EntityKind {
     fn from(e: Entity) -> Self {
@@ -257,6 +421,12 @@ impl From<Entity> for EntityKind {
 impl From<ModelEntity> for EntityKind {
     fn from(e: ModelEntity) -> Self {
         EntityKind::ModelEntity(e)
+    }
+}
+
+impl From<LoadedEntity> for EntityKind {
+    fn from(e: LoadedEntity) -> Self {
+        EntityKind::LoadedEntity(e)
     }
 }
 

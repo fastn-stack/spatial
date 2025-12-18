@@ -1,0 +1,12 @@
+[package]
+name = "cube-glb"
+version = "0.1.0"
+edition = "2024"
+description = "Example loading a cube from a GLB file using fastn"
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+fastn = { path = "../../fastn" }
