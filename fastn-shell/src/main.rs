@@ -23,6 +23,7 @@ use winit::{
 use fastn::{
     Command, Event, LogLevel,
     InputEvent, KeyboardEvent, KeyEventData, DeviceId,
+    GamepadEvent, GamepadInputData,
     LifecycleEvent, FrameEvent,
 };
 
@@ -298,29 +299,51 @@ impl ApplicationHandler for App {
                 let mut event_pump = self.sdl_context.event_pump().unwrap();
                 event_pump.pump_events();
 
-                // Update gamepad state
+                // Update gamepad state and send event to core
                 if let Some(ref mut gamepad) = self.gamepad {
                     gamepad.update();
 
-                    // Log gamepad state periodically (every 500ms) if there's input
-                    if gamepad.has_input()
-                        && now.duration_since(self.last_gamepad_log).as_millis() > 500
-                    {
-                        let state = gamepad.state();
-                        log::info!(
-                            "Gamepad: L({:.2},{:.2}) R({:.2},{:.2}) LT:{:.2} RT:{:.2} A:{} B:{} X:{} Y:{}",
+                    let state = gamepad.state();
+                    if state.connected {
+                        // Build axes array: [left_x, left_y, right_x, right_y, left_trigger, right_trigger]
+                        let axes = vec![
                             state.left_stick_x,
                             state.left_stick_y,
                             state.right_stick_x,
                             state.right_stick_y,
                             state.left_trigger,
                             state.right_trigger,
-                            state.button_a,
-                            state.button_b,
-                            state.button_x,
-                            state.button_y
-                        );
-                        self.last_gamepad_log = now;
+                        ];
+
+                        // Build buttons array: [(pressure, pressed), ...]
+                        // Order: A, B, X, Y, LB, RB, Back, Start, Guide, LS, RS, DPadUp, DPadDown, DPadLeft, DPadRight
+                        let buttons = vec![
+                            (if state.button_a { 1.0 } else { 0.0 }, state.button_a),
+                            (if state.button_b { 1.0 } else { 0.0 }, state.button_b),
+                            (if state.button_x { 1.0 } else { 0.0 }, state.button_x),
+                            (if state.button_y { 1.0 } else { 0.0 }, state.button_y),
+                            (if state.left_shoulder { 1.0 } else { 0.0 }, state.left_shoulder),
+                            (if state.right_shoulder { 1.0 } else { 0.0 }, state.right_shoulder),
+                            (if state.back { 1.0 } else { 0.0 }, state.back),
+                            (if state.start { 1.0 } else { 0.0 }, state.start),
+                            (if state.guide { 1.0 } else { 0.0 }, state.guide),
+                            (if state.left_stick_button { 1.0 } else { 0.0 }, state.left_stick_button),
+                            (if state.right_stick_button { 1.0 } else { 0.0 }, state.right_stick_button),
+                            (if state.dpad_up { 1.0 } else { 0.0 }, state.dpad_up),
+                            (if state.dpad_down { 1.0 } else { 0.0 }, state.dpad_down),
+                            (if state.dpad_left { 1.0 } else { 0.0 }, state.dpad_left),
+                            (if state.dpad_right { 1.0 } else { 0.0 }, state.dpad_right),
+                        ];
+
+                        let gamepad_input = GamepadInputData {
+                            device_id: DeviceId::from("gamepad-0"),
+                            axes,
+                            buttons,
+                        };
+
+                        self.send_event(Event::Input(InputEvent::Gamepad(
+                            GamepadEvent::Input(gamepad_input)
+                        )));
                     }
                 }
 
