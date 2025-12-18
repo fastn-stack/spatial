@@ -3,7 +3,7 @@
 //! Default camera controller that handles keyboard, mouse, and gamepad input
 //! to move the camera around in the scene.
 
-use crate::protocol::*;
+use fastn_protocol::*;
 use std::collections::HashSet;
 
 /// Default camera settings

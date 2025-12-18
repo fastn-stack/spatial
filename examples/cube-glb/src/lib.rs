@@ -1,5 +1,9 @@
 //! Cube GLB Example - Loading a 3D model from a GLB file
 //!
+//! Run:   cargo run -p cube-glb          (native shell)
+//! Build: cargo run -p cube-glb -- build (web, creates dist/)
+//! Serve: cargo run -p cube-glb -- serve (web server)
+//!
 //! This example demonstrates loading a cube mesh from a GLB file
 //! using the Entity::load() API.
 

@@ -5,6 +5,10 @@ edition = "2024"
 description = "Native shell for spatial/XR applications using wgpu + wasmtime"
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "fastn_shell"
+path = "src/lib.rs"
+
 [[bin]]
 name = "fastn-shell"
 path = "src/main.rs"
@@ -23,7 +27,7 @@ bytemuck.workspace = true
 glam.workspace = true
 
 # Protocol types (for deserializing commands)
-fastn = { path = "../fastn" }
+fastn-protocol = { path = "../fastn-protocol" }
 
 # Utilities
 log.workspace = true

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use winit::window::Window;
 use wgpu::util::DeviceExt;
-use fastn::{CreateVolumeData, BackgroundData, CameraData};
+use fastn_protocol::{CreateVolumeData, BackgroundData, CameraData};
 use glam::{Mat4, Vec3};
 use bytemuck::{Pod, Zeroable};
 use crate::asset_loader::AssetManager;
@@ -276,10 +276,10 @@ impl Renderer {
     pub fn create_volume(&mut self, data: &CreateVolumeData, asset_manager: &AssetManager) {
         // Determine mesh type and create appropriate volume
         let (mesh, color) = match &data.source {
-            fastn::VolumeSource::Primitive(p) => {
+            fastn_protocol::VolumeSource::Primitive(p) => {
                 let size = match p {
-                    fastn::Primitive::Cube { size } => *size,
-                    fastn::Primitive::Box { width, .. } => *width,
+                    fastn_protocol::Primitive::Cube { size } => *size,
+                    fastn_protocol::Primitive::Box { width, .. } => *width,
                     _ => 1.0,
                 };
                 let color = data.material
@@ -288,7 +288,7 @@ impl Renderer {
                     .unwrap_or([1.0, 1.0, 1.0, 1.0]);
                 (VolumeMesh::Primitive { size }, color)
             }
-            fastn::VolumeSource::Asset { asset_id, .. } => {
+            fastn_protocol::VolumeSource::Asset { asset_id, .. } => {
                 if let Some(loaded_mesh) = asset_manager.get_mesh(asset_id) {
                     // Create GPU buffers from loaded mesh
                     let vertices: Vec<Vertex> = loaded_mesh.vertices.iter()

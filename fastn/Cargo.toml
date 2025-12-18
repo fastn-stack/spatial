@@ -8,9 +8,18 @@ license = "MIT OR Apache-2.0"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["cli"]
+cli = ["fastn-cli"]
+
 [dependencies]
 # Core dependencies (always needed)
 log.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 fastn-macros = { path = "../fastn-macros" }
+fastn-protocol = { path = "../fastn-protocol" }
+
+# CLI (native only, optional)
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+fastn-cli = { path = "../fastn-cli", optional = true }

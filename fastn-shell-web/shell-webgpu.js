@@ -333,7 +333,8 @@ class WebGPUShell {
 }
 
 // Main entry point for WebGPU shell
-async function initWebGPU() {
+// wasmPathArg: optional WASM path (from HTML data attribute or caller)
+async function initWebGPU(wasmPathArg) {
     const canvas = document.getElementById('canvas');
     const errorDiv = document.getElementById('error');
 
@@ -341,9 +342,9 @@ async function initWebGPU() {
         const shell = new WebGPUShell(canvas);
         await shell.init();
 
-        // Get WASM path from URL params or use default
+        // Get WASM path: argument > URL param > canvas data attribute > default
         const params = new URLSearchParams(window.location.search);
-        const wasmPath = params.get('app') || WASM_PATH;
+        const wasmPath = wasmPathArg || params.get('app') || canvas.dataset.wasm || WASM_PATH;
 
         await shell.loadWasm(wasmPath);
         shell.render();

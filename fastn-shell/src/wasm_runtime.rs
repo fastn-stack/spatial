@@ -8,7 +8,7 @@
 //! - `alloc(size) -> ptr` - Allocate memory in WASM
 //! - `dealloc(ptr, size)` - Deallocate memory in WASM
 
-use fastn::{Command, Event};
+use fastn_protocol::{Command, Event};
 use wasmtime::*;
 
 pub struct WasmCore {

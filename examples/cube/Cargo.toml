@@ -8,5 +8,9 @@ license = "MIT OR Apache-2.0"
 [lib]
 crate-type = ["cdylib"]
 
+[[bin]]
+name = "cube"
+path = "src/main.rs"
+
 [dependencies]
 fastn = { path = "../../fastn" }

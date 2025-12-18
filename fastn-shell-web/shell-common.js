@@ -1,7 +1,7 @@
 // fastn-shell-web - Shared code for WASM interaction and event handling
 // Used by both WebGPU and WebGL+XR shells
 
-const WASM_PATH = './cube_glb.wasm';
+const WASM_PATH = './cube.wasm';
 
 // ============================================================================
 // WASM Core - Handles WASM loading and event communication

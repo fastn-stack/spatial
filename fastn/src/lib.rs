@@ -36,7 +36,6 @@ mod camera;
 mod entity;
 mod material;
 mod mesh;
-mod protocol;
 mod reality_view;
 
 #[doc(hidden)]
@@ -61,7 +60,7 @@ pub use material::SimpleMaterial;
 pub use reality_view::RealityViewContent;
 
 // Protocol types for advanced usage
-pub use protocol::*;
+pub use fastn_protocol::*;
 
 /// Create a new RealityViewContent.
 ///
@@ -69,3 +68,7 @@ pub use protocol::*;
 pub fn content() -> RealityViewContent {
     RealityViewContent::new()
 }
+
+// Re-export CLI main function for native targets
+#[cfg(all(not(target_arch = "wasm32"), feature = "cli"))]
+pub use fastn_cli::main;

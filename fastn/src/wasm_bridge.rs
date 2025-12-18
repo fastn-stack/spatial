@@ -6,7 +6,7 @@
 //! Design: No global state. The shell owns a pointer to CoreApp which holds all state.
 
 use crate::camera::CameraController;
-use crate::protocol::{Command, Event};
+use fastn_protocol::{Command, Event};
 
 /// The core application state that the shell owns.
 /// This struct holds all state - no thread-locals or globals.

@@ -485,7 +485,8 @@ class WebGLXRShell {
 }
 
 // Main entry point for WebGL+XR shell
-async function initWebGLXR() {
+// wasmPathArg: optional WASM path (from HTML data attribute or caller)
+async function initWebGLXR(wasmPathArg) {
     const canvas = document.getElementById('canvas');
     const errorDiv = document.getElementById('error');
 
@@ -493,9 +494,9 @@ async function initWebGLXR() {
         const shell = new WebGLXRShell(canvas);
         await shell.init();
 
-        // Get WASM path from URL params or use default
+        // Get WASM path: argument > URL param > canvas data attribute > default
         const params = new URLSearchParams(window.location.search);
-        const wasmPath = params.get('app') || WASM_PATH;
+        const wasmPath = wasmPathArg || params.get('app') || canvas.dataset.wasm || WASM_PATH;
 
         await shell.loadWasm(wasmPath);
         shell.render();

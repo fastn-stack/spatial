@@ -1,0 +1,12 @@
+[package]
+name = "fastn-protocol"
+version = "0.1.0"
+edition = "2024"
+description = "Shell-Core protocol types for fastn spatial framework"
+license = "MIT OR Apache-2.0"
+
+[lib]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

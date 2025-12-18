@@ -1,7 +1,8 @@
 //! Cube Example
 //!
-//! Build: cargo build -p cube --target wasm32-unknown-unknown --release
-//! Run:   fastn-shell ./target/wasm32-unknown-unknown/release/cube.wasm
+//! Run:   cargo run -p cube          (native shell)
+//! Build: cargo run -p cube -- build (web, creates dist/)
+//! Serve: cargo run -p cube -- serve (web server)
 //!
 //! # Swift equivalent:
 //! ```swift
