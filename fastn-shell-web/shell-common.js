@@ -1,7 +1,7 @@
 // fastn-shell-web - Shared code for WASM interaction and event handling
 // Used by both WebGPU and WebGL+XR shells
 
-const WASM_PATH = './cube.wasm';
+const WASM_PATH = './cube_glb.wasm';
 
 // ============================================================================
 // WASM Core - Handles WASM loading and event communication
@@ -226,10 +226,24 @@ class SceneState {
             near: 0.1,
             far: 100.0,
         };
+        this.assetManager = new AssetManager();
+        this.pendingAssets = []; // Assets to be loaded
+        this.onVolumeCreated = null; // Callback for custom mesh creation
     }
 
-    processCommands(commands) {
+    async processCommands(commands) {
         for (const cmd of commands) {
+            if (cmd.category === "Asset" && cmd.command) {
+                if (cmd.command.action === "Load") {
+                    // Queue asset for loading
+                    this.pendingAssets.push({
+                        asset_id: cmd.command.asset_id,
+                        path: cmd.command.path,
+                    });
+                }
+                continue;
+            }
+
             if (cmd.category === "Environment" && cmd.command) {
                 if (cmd.command.action === "SetCamera") {
                     this.camera.position = cmd.command.position;
@@ -251,6 +265,16 @@ class SceneState {
                 continue;
             }
         }
+
+        // Load any pending assets
+        await this.loadPendingAssets();
+    }
+
+    async loadPendingAssets() {
+        for (const asset of this.pendingAssets) {
+            await this.assetManager.load(asset.asset_id, asset.path);
+        }
+        this.pendingAssets = [];
     }
 
     handleCreateVolume(cmd) {
@@ -262,15 +286,28 @@ class SceneState {
         }
 
         let size = 0.5;
-        if (cmd.source && cmd.source.Primitive) {
-            if (cmd.source.Primitive.Cube) {
-                size = cmd.source.Primitive.Cube.size;
-            } else if (cmd.source.Primitive.Sphere) {
-                size = cmd.source.Primitive.Sphere.radius * 2;
-            } else if (cmd.source.Primitive.Box) {
-                size = Math.max(cmd.source.Primitive.Box.width,
-                               cmd.source.Primitive.Box.height,
-                               cmd.source.Primitive.Box.depth);
+        let meshType = 'primitive';
+        let assetId = null;
+
+        if (cmd.source) {
+            if (cmd.source.Primitive) {
+                if (cmd.source.Primitive.Cube) {
+                    size = cmd.source.Primitive.Cube.size;
+                } else if (cmd.source.Primitive.Sphere) {
+                    size = cmd.source.Primitive.Sphere.radius * 2;
+                } else if (cmd.source.Primitive.Box) {
+                    size = Math.max(cmd.source.Primitive.Box.width,
+                                   cmd.source.Primitive.Box.height,
+                                   cmd.source.Primitive.Box.depth);
+                }
+            } else if (cmd.source.Asset) {
+                meshType = 'asset';
+                assetId = cmd.source.Asset.asset_id;
+                // Get color from loaded mesh if available
+                const mesh = this.assetManager.getMesh(assetId);
+                if (mesh) {
+                    color = mesh.color;
+                }
             }
         }
 
@@ -278,15 +315,26 @@ class SceneState {
         const position = transform.position || [0, 0, 0];
         const scale = transform.scale || [1, 1, 1];
 
-        this.volumes.set(cmd.volume_id, {
+        const volume = {
             id: cmd.volume_id,
             position: position,
             scale: scale,
             size: size,
             color: color,
-        });
+            meshType: meshType,
+            assetId: assetId,
+            // These will be set by renderer for custom meshes
+            customBuffers: null,
+        };
 
-        console.log('Added volume:', this.volumes.get(cmd.volume_id));
+        this.volumes.set(cmd.volume_id, volume);
+
+        // Notify renderer to create custom buffers if needed
+        if (meshType === 'asset' && this.onVolumeCreated) {
+            this.onVolumeCreated(volume, this.assetManager);
+        }
+
+        console.log('Added volume:', volume);
     }
 }
 
@@ -479,6 +527,158 @@ const CubeGeometry = {
 };
 
 // ============================================================================
+// Asset Manager - Loads and caches GLB/glTF files
+// ============================================================================
+
+class AssetManager {
+    constructor() {
+        this.meshes = new Map(); // asset_id -> LoadedMesh
+        this.basePath = './';
+    }
+
+    setBasePath(path) {
+        this.basePath = path.endsWith('/') ? path : path + '/';
+    }
+
+    async load(assetId, path) {
+        if (this.meshes.has(assetId)) {
+            console.log(`Asset ${assetId} already loaded, skipping`);
+            return true;
+        }
+
+        const fullPath = this.basePath + path;
+        console.log(`Loading asset ${assetId} from ${fullPath}`);
+
+        try {
+            const response = await fetch(fullPath);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const arrayBuffer = await response.arrayBuffer();
+            const mesh = this.parseGLB(arrayBuffer);
+
+            this.meshes.set(assetId, mesh);
+            console.log(`Loaded mesh: ${mesh.vertices.length / 3} vertices, ${mesh.indices.length} indices, color: [${mesh.color.join(', ')}]`);
+            return true;
+        } catch (e) {
+            console.error(`Failed to load asset ${assetId}: ${e.message}`);
+            return false;
+        }
+    }
+
+    getMesh(assetId) {
+        return this.meshes.get(assetId);
+    }
+
+    parseGLB(arrayBuffer) {
+        const dataView = new DataView(arrayBuffer);
+
+        // GLB header
+        const magic = dataView.getUint32(0, true);
+        if (magic !== 0x46546C67) { // 'glTF'
+            throw new Error('Invalid GLB magic number');
+        }
+
+        const version = dataView.getUint32(4, true);
+        if (version !== 2) {
+            throw new Error(`Unsupported glTF version: ${version}`);
+        }
+
+        // const length = dataView.getUint32(8, true);
+
+        // Read JSON chunk
+        let offset = 12;
+        const jsonChunkLength = dataView.getUint32(offset, true);
+        const jsonChunkType = dataView.getUint32(offset + 4, true);
+        offset += 8;
+
+        if (jsonChunkType !== 0x4E4F534A) { // 'JSON'
+            throw new Error('First chunk is not JSON');
+        }
+
+        const jsonBytes = new Uint8Array(arrayBuffer, offset, jsonChunkLength);
+        const json = JSON.parse(new TextDecoder().decode(jsonBytes));
+        offset += jsonChunkLength;
+
+        // Read binary chunk
+        const binChunkLength = dataView.getUint32(offset, true);
+        const binChunkType = dataView.getUint32(offset + 4, true);
+        offset += 8;
+
+        if (binChunkType !== 0x004E4942) { // 'BIN\0'
+            throw new Error('Second chunk is not BIN');
+        }
+
+        const binData = new Uint8Array(arrayBuffer, offset, binChunkLength);
+
+        // Extract mesh data from first primitive
+        const mesh = json.meshes[0];
+        const primitive = mesh.primitives[0];
+
+        // Get accessors
+        const posAccessor = json.accessors[primitive.attributes.POSITION];
+        const normalAccessor = primitive.attributes.NORMAL !== undefined
+            ? json.accessors[primitive.attributes.NORMAL]
+            : null;
+        const indexAccessor = json.accessors[primitive.indices];
+
+        // Get buffer views
+        const posView = json.bufferViews[posAccessor.bufferView];
+        const indexView = json.bufferViews[indexAccessor.bufferView];
+
+        // Extract positions
+        const posOffset = (posView.byteOffset || 0) + (posAccessor.byteOffset || 0);
+        const positions = new Float32Array(binData.buffer, binData.byteOffset + posOffset, posAccessor.count * 3);
+
+        // Extract normals (or generate defaults)
+        let normals;
+        if (normalAccessor) {
+            const normalView = json.bufferViews[normalAccessor.bufferView];
+            const normalOffset = (normalView.byteOffset || 0) + (normalAccessor.byteOffset || 0);
+            normals = new Float32Array(binData.buffer, binData.byteOffset + normalOffset, normalAccessor.count * 3);
+        } else {
+            // Default normals pointing up
+            normals = new Float32Array(posAccessor.count * 3);
+            for (let i = 0; i < posAccessor.count; i++) {
+                normals[i * 3 + 1] = 1.0; // Y-up
+            }
+        }
+
+        // Extract indices
+        const indexOffset = (indexView.byteOffset || 0) + (indexAccessor.byteOffset || 0);
+        let indices;
+        if (indexAccessor.componentType === 5123) { // UNSIGNED_SHORT
+            indices = new Uint16Array(binData.buffer, binData.byteOffset + indexOffset, indexAccessor.count);
+        } else if (indexAccessor.componentType === 5125) { // UNSIGNED_INT
+            indices = new Uint32Array(binData.buffer, binData.byteOffset + indexOffset, indexAccessor.count);
+        } else {
+            throw new Error(`Unsupported index type: ${indexAccessor.componentType}`);
+        }
+
+        // Extract base color from material
+        let color = [0.8, 0.8, 0.8, 1.0]; // Default light gray
+        if (primitive.material !== undefined) {
+            const material = json.materials[primitive.material];
+            if (material.pbrMetallicRoughness && material.pbrMetallicRoughness.baseColorFactor) {
+                color = material.pbrMetallicRoughness.baseColorFactor;
+            }
+        }
+
+        // Copy arrays since they reference the original buffer
+        return {
+            vertices: new Float32Array(positions),
+            normals: new Float32Array(normals),
+            indices: indexAccessor.componentType === 5125
+                ? new Uint32Array(indices)
+                : new Uint16Array(indices),
+            indexType: indexAccessor.componentType === 5125 ? 'uint32' : 'uint16',
+            color: color,
+        };
+    }
+}
+
+// ============================================================================
 // Platform Detection
 // ============================================================================
 
@@ -516,6 +716,7 @@ if (typeof window !== 'undefined') {
     window.SceneState = SceneState;
     window.MathUtils = MathUtils;
     window.CubeGeometry = CubeGeometry;
+    window.AssetManager = AssetManager;
     window.detectPlatform = detectPlatform;
     window.WASM_PATH = WASM_PATH;
 }

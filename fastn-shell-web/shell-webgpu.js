@@ -24,7 +24,58 @@ class WebGPUShell {
         this.inputHandler = new InputHandler(this.core);
         this.inputHandler.setCommandHandler((commands) => this.sceneState.processCommands(commands));
 
+        // Set up callback for creating custom mesh buffers
+        this.sceneState.onVolumeCreated = (volume, assetManager) => {
+            this.createCustomMeshBuffers(volume, assetManager);
+        };
+
         this.lastFrameTime = performance.now();
+    }
+
+    // Create GPU buffers for custom mesh from loaded asset
+    createCustomMeshBuffers(volume, assetManager) {
+        if (!this.device || volume.meshType !== 'asset') return;
+
+        const mesh = assetManager.getMesh(volume.assetId);
+        if (!mesh) {
+            console.warn(`Asset ${volume.assetId} not found for volume ${volume.id}`);
+            return;
+        }
+
+        // Interleave vertices and normals for our shader format
+        const vertexCount = mesh.vertices.length / 3;
+        const interleavedData = new Float32Array(vertexCount * 6);
+        for (let i = 0; i < vertexCount; i++) {
+            interleavedData[i * 6 + 0] = mesh.vertices[i * 3 + 0];
+            interleavedData[i * 6 + 1] = mesh.vertices[i * 3 + 1];
+            interleavedData[i * 6 + 2] = mesh.vertices[i * 3 + 2];
+            interleavedData[i * 6 + 3] = mesh.normals[i * 3 + 0];
+            interleavedData[i * 6 + 4] = mesh.normals[i * 3 + 1];
+            interleavedData[i * 6 + 5] = mesh.normals[i * 3 + 2];
+        }
+
+        const vertexBuffer = this.device.createBuffer({
+            size: interleavedData.byteLength,
+            usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(vertexBuffer, 0, interleavedData);
+
+        // Convert indices to Uint32 for WebGPU if needed
+        const indices = mesh.indexType === 'uint32' ? mesh.indices : new Uint32Array(mesh.indices);
+        const indexBuffer = this.device.createBuffer({
+            size: indices.byteLength,
+            usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(indexBuffer, 0, indices);
+
+        volume.customBuffers = {
+            vertexBuffer,
+            indexBuffer,
+            indexCount: mesh.indices.length,
+            indexFormat: 'uint32',
+        };
+
+        console.log(`Created WebGPU buffers for ${volume.id}: ${vertexCount} vertices, ${mesh.indices.length} indices`);
     }
 
     async init() {
@@ -235,8 +286,6 @@ class WebGPUShell {
         });
 
         renderPass.setPipeline(this.pipeline);
-        renderPass.setVertexBuffer(0, this.vertexBuffer);
-        renderPass.setIndexBuffer(this.indexBuffer, 'uint16');
 
         // Render each volume
         const camera = this.sceneState.camera;
@@ -248,7 +297,17 @@ class WebGPUShell {
 
             this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
             renderPass.setBindGroup(0, this.uniformBindGroup);
-            renderPass.drawIndexed(this.indexCount);
+
+            // Use custom buffers for asset meshes, primitive cube for others
+            if (volume.customBuffers) {
+                renderPass.setVertexBuffer(0, volume.customBuffers.vertexBuffer);
+                renderPass.setIndexBuffer(volume.customBuffers.indexBuffer, volume.customBuffers.indexFormat);
+                renderPass.drawIndexed(volume.customBuffers.indexCount);
+            } else {
+                renderPass.setVertexBuffer(0, this.vertexBuffer);
+                renderPass.setIndexBuffer(this.indexBuffer, 'uint16');
+                renderPass.drawIndexed(this.indexCount);
+            }
         }
 
         renderPass.end();
@@ -263,7 +322,10 @@ class WebGPUShell {
         // Use shared math utilities
         const projection = MathUtils.perspectiveRH(camera.fov, aspect, camera.near, camera.far);
         const view = MathUtils.lookAtRH(camera.position, camera.target, camera.up);
-        const model = MathUtils.modelMatrix(volume.position, volume.size);
+
+        // For custom meshes, use the scale from transform; for primitives, use size
+        const scale = volume.meshType === 'asset' ? volume.scale[0] : volume.size;
+        const model = MathUtils.modelMatrix(volume.position, scale);
 
         // MVP = projection * view * model
         return MathUtils.multiplyMatrices(projection, MathUtils.multiplyMatrices(view, model));

@@ -21,6 +21,11 @@ class WebGLXRShell {
         this.inputHandler = new InputHandler(this.core);
         this.inputHandler.setCommandHandler((commands) => this.sceneState.processCommands(commands));
 
+        // Set up callback for creating custom mesh buffers
+        this.sceneState.onVolumeCreated = (volume, assetManager) => {
+            this.createCustomMeshBuffers(volume, assetManager);
+        };
+
         this.lastFrameTime = performance.now();
 
         // WebXR state
@@ -28,6 +33,47 @@ class WebGLXRShell {
         this.xrRefSpace = null;
         this.xrGLLayer = null;
         this.inVR = false;
+    }
+
+    // Create GL buffers for custom mesh from loaded asset
+    createCustomMeshBuffers(volume, assetManager) {
+        if (!this.gl || volume.meshType !== 'asset') return;
+
+        const mesh = assetManager.getMesh(volume.assetId);
+        if (!mesh) {
+            console.warn(`Asset ${volume.assetId} not found for volume ${volume.id}`);
+            return;
+        }
+
+        const gl = this.gl;
+
+        // Position buffer
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, mesh.vertices, gl.STATIC_DRAW);
+
+        // Normal buffer
+        const normalBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, normalBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, mesh.normals, gl.STATIC_DRAW);
+
+        // Index buffer
+        const indexBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
+
+        // Determine index type
+        const indexType = mesh.indexType === 'uint32' ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT;
+
+        volume.customBuffers = {
+            positionBuffer,
+            normalBuffer,
+            indexBuffer,
+            indexCount: mesh.indices.length,
+            indexType,
+        };
+
+        console.log(`Created WebGL buffers for ${volume.id}: ${mesh.vertices.length / 3} vertices, ${mesh.indices.length} indices`);
     }
 
     async init() {
@@ -396,20 +442,11 @@ class WebGLXRShell {
 
         gl.useProgram(this.program);
 
-        // Bind buffers
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
-        gl.enableVertexAttribArray(this.attribs.position);
-        gl.vertexAttribPointer(this.attribs.position, 3, gl.FLOAT, false, 0, 0);
-
-        gl.bindBuffer(gl.ARRAY_BUFFER, this.normalBuffer);
-        gl.enableVertexAttribArray(this.attribs.normal);
-        gl.vertexAttribPointer(this.attribs.normal, 3, gl.FLOAT, false, 0, 0);
-
-        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
-
         // Render each volume
         for (const volume of this.sceneState.volumes.values()) {
-            const model = MathUtils.modelMatrix(volume.position, volume.size);
+            // For custom meshes, use the scale from transform; for primitives, use size
+            const scale = volume.meshType === 'asset' ? volume.scale[0] : volume.size;
+            const model = MathUtils.modelMatrix(volume.position, scale);
 
             // MVP = projection * view * model
             const vp = MathUtils.multiplyMatrices(projection, view);
@@ -419,7 +456,30 @@ class WebGLXRShell {
             gl.uniformMatrix4fv(this.uniforms.model, false, model);
             gl.uniform4fv(this.uniforms.color, volume.color);
 
-            gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0);
+            // Use custom buffers for asset meshes, primitive cube for others
+            if (volume.customBuffers) {
+                gl.bindBuffer(gl.ARRAY_BUFFER, volume.customBuffers.positionBuffer);
+                gl.enableVertexAttribArray(this.attribs.position);
+                gl.vertexAttribPointer(this.attribs.position, 3, gl.FLOAT, false, 0, 0);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, volume.customBuffers.normalBuffer);
+                gl.enableVertexAttribArray(this.attribs.normal);
+                gl.vertexAttribPointer(this.attribs.normal, 3, gl.FLOAT, false, 0, 0);
+
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, volume.customBuffers.indexBuffer);
+                gl.drawElements(gl.TRIANGLES, volume.customBuffers.indexCount, volume.customBuffers.indexType, 0);
+            } else {
+                gl.bindBuffer(gl.ARRAY_BUFFER, this.positionBuffer);
+                gl.enableVertexAttribArray(this.attribs.position);
+                gl.vertexAttribPointer(this.attribs.position, 3, gl.FLOAT, false, 0, 0);
+
+                gl.bindBuffer(gl.ARRAY_BUFFER, this.normalBuffer);
+                gl.enableVertexAttribArray(this.attribs.normal);
+                gl.vertexAttribPointer(this.attribs.normal, 3, gl.FLOAT, false, 0, 0);
+
+                gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.indexBuffer);
+                gl.drawElements(gl.TRIANGLES, this.indexCount, gl.UNSIGNED_SHORT, 0);
+            }
         }
     }
 }
