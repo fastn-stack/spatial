@@ -1,11 +1,12 @@
 //! WASM runtime using wasmtime
 //!
 //! The WASM module must export:
-//! - `init_core() -> commands_json_ptr` - Initialize and return initial commands
-//! - `on_event(event_ptr, event_len) -> commands_json_ptr` - Process event and return commands
+//! - `init_core() -> app_ptr` - Initialize and return app pointer
+//! - `get_result_ptr(app_ptr) -> ptr` - Get pointer to result JSON
+//! - `get_result_len(app_ptr) -> len` - Get length of result JSON
+//! - `on_event(app_ptr, event_ptr, event_len) -> ptr` - Process event
 //! - `alloc(size) -> ptr` - Allocate memory in WASM
 //! - `dealloc(ptr, size)` - Deallocate memory in WASM
-//! - `get_result_len() -> len` - Get length of result buffer
 
 use fastn::{Command, Event};
 use wasmtime::*;
@@ -13,9 +14,11 @@ use wasmtime::*;
 pub struct WasmCore {
     store: Store<()>,
     memory: Memory,
+    app_ptr: i32,
     alloc: TypedFunc<i32, i32>,
-    on_event: TypedFunc<(i32, i32), i32>,
-    get_result_len: TypedFunc<(), i32>,
+    on_event: TypedFunc<(i32, i32, i32), i32>,
+    get_result_ptr: TypedFunc<i32, i32>,
+    get_result_len: TypedFunc<i32, i32>,
 }
 
 impl WasmCore {
@@ -37,14 +40,20 @@ impl WasmCore {
             .get_typed_func::<i32, i32>(&mut store, "alloc")?;
 
         let on_event = instance
-            .get_typed_func::<(i32, i32), i32>(&mut store, "on_event")?;
+            .get_typed_func::<(i32, i32, i32), i32>(&mut store, "on_event")?;
+
+        let get_result_ptr = instance
+            .get_typed_func::<i32, i32>(&mut store, "get_result_ptr")?;
 
         let get_result_len = instance
-            .get_typed_func::<(), i32>(&mut store, "get_result_len")?;
+            .get_typed_func::<i32, i32>(&mut store, "get_result_len")?;
 
-        // Initialize the core and get initial commands
-        let result_ptr = init_core.call(&mut store, ())?;
-        let result_len = get_result_len.call(&mut store, ())?;
+        // Initialize the core and get app pointer
+        let app_ptr = init_core.call(&mut store, ())?;
+
+        // Read initial commands from result buffer
+        let result_ptr = get_result_ptr.call(&mut store, app_ptr)?;
+        let result_len = get_result_len.call(&mut store, app_ptr)?;
 
         let commands = if result_len > 0 {
             let mem_data = memory.data(&store);
@@ -61,8 +70,10 @@ impl WasmCore {
         let core = Self {
             store,
             memory,
+            app_ptr,
             alloc,
             on_event,
+            get_result_ptr,
             get_result_len,
         };
 
@@ -83,12 +94,13 @@ impl WasmCore {
         self.memory.data_mut(&mut self.store)[event_ptr as usize..(event_ptr as usize + event_len as usize)]
             .copy_from_slice(event_bytes);
 
-        // Call on_event
-        let result_ptr = self.on_event.call(&mut self.store, (event_ptr, event_len))?;
-        let result_len = self.get_result_len.call(&mut self.store, ())?;
+        // Call on_event with app pointer
+        let _result_ptr = self.on_event.call(&mut self.store, (self.app_ptr, event_ptr, event_len))?;
+        let result_len = self.get_result_len.call(&mut self.store, self.app_ptr)?;
 
         // Read the commands from WASM memory
         let commands = if result_len > 0 {
+            let result_ptr = self.get_result_ptr.call(&mut self.store, self.app_ptr)?;
             let mem_data = self.memory.data(&self.store);
             let result_bytes = &mem_data[result_ptr as usize..(result_ptr as usize + result_len as usize)];
             let result_json = std::str::from_utf8(result_bytes)?;

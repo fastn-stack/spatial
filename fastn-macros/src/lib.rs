@@ -9,16 +9,23 @@ use syn::{parse_macro_input, ItemFn};
 /// This attribute generates the necessary FFI exports for WASM.
 /// The function receives a `&mut RealityViewContent` to populate with entities.
 ///
-/// # Example (matching visionOS RealityView pattern)
+/// ## WASM API
+///
+/// The generated exports follow a handle-based pattern:
+/// - `init_core() -> app_ptr` - Create app, returns pointer (as i32)
+/// - `get_result_ptr(app_ptr) -> ptr` - Get pointer to result JSON
+/// - `get_result_len(app_ptr) -> len` - Get length of result JSON
+/// - `on_event(app_ptr, event_ptr, event_len) -> ptr` - Process event, returns result ptr
+/// - `alloc(size) -> ptr` - Allocate memory for shell to write into
+/// - `dealloc(ptr, size)` - Free allocated memory
+///
+/// # Example
 ///
 /// ```rust,ignore
 /// use fastn::{ModelEntity, MeshResource, SimpleMaterial, RealityViewContent};
 ///
 /// #[fastn::app]
 /// fn make_content(content: &mut RealityViewContent) {
-///     // Equivalent to Swift:
-///     // let box = ModelEntity(mesh: .generateBox(size: 0.5),
-///     //                       materials: [SimpleMaterial(color: .red, isMetallic: false)])
 ///     let cube = ModelEntity::new(
 ///         MeshResource::generate_box(0.5),
 ///         SimpleMaterial::new().color(1.0, 0.0, 0.0)
@@ -31,36 +38,48 @@ pub fn app(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
     let fn_name = &input_fn.sig.ident;
 
-    // Generate the FFI exports alongside the original function
     let expanded = quote! {
         #input_fn
 
+        /// Create the app and return its pointer.
+        /// Call get_result_ptr/get_result_len to read initial commands.
         #[unsafe(no_mangle)]
-        pub extern "C" fn init_core() -> *const u8 {
+        pub extern "C" fn init_core() -> i32 {
             let mut content = fastn::RealityViewContent::new();
             #fn_name(&mut content);
-            fastn::wasm_bridge::store_content(&content);
-            fastn::wasm_bridge::get_result_ptr()
+            fastn::wasm_bridge::create_app(&content) as i32
+        }
+
+        /// Get pointer to the result buffer (initial commands or last on_event result)
+        #[unsafe(no_mangle)]
+        pub extern "C" fn get_result_ptr(app_ptr: i32) -> i32 {
+            fastn::wasm_bridge::get_result_ptr(app_ptr as *const fastn::wasm_bridge::CoreApp) as i32
+        }
+
+        /// Get length of the result buffer
+        #[unsafe(no_mangle)]
+        pub extern "C" fn get_result_len(app_ptr: i32) -> i32 {
+            fastn::wasm_bridge::get_result_len(app_ptr as *const fastn::wasm_bridge::CoreApp) as i32
+        }
+
+        /// Process an event. Returns pointer to result JSON.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn on_event(app_ptr: i32, event_ptr: i32, event_len: i32) -> i32 {
+            fastn::wasm_bridge::app_on_event(
+                app_ptr as *mut fastn::wasm_bridge::CoreApp,
+                event_ptr as *const u8,
+                event_len as usize
+            ) as i32
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn on_event(event_ptr: *const u8, event_len: usize) -> *const u8 {
-            fastn::wasm_bridge::on_event(event_ptr, event_len)
+        pub extern "C" fn alloc(size: i32) -> i32 {
+            fastn::wasm_bridge::alloc(size as usize) as i32
         }
 
         #[unsafe(no_mangle)]
-        pub extern "C" fn alloc(size: usize) -> *mut u8 {
-            fastn::wasm_bridge::alloc(size)
-        }
-
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn dealloc(ptr: *mut u8, size: usize) {
-            unsafe { fastn::wasm_bridge::dealloc(ptr, size) }
-        }
-
-        #[unsafe(no_mangle)]
-        pub extern "C" fn get_result_len() -> usize {
-            fastn::wasm_bridge::get_result_len()
+        pub unsafe extern "C" fn dealloc(ptr: i32, size: i32) {
+            unsafe { fastn::wasm_bridge::dealloc(ptr as *mut u8, size as usize) }
         }
     };
 
