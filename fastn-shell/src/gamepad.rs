@@ -1,6 +1,7 @@
 //! Gamepad input handling using SDL2
 //!
 //! Provides gamepad state that can be polled each frame.
+//! Supports hot-plug detection for connecting/disconnecting controllers.
 
 use sdl2::controller::{GameController, Axis, Button};
 use sdl2::GameControllerSubsystem;
@@ -47,7 +48,7 @@ pub struct GamepadState {
 }
 
 pub struct GamepadManager {
-    _controller_subsystem: GameControllerSubsystem,
+    controller_subsystem: GameControllerSubsystem,
     controller: Option<GameController>,
     state: GamepadState,
 }
@@ -66,7 +67,7 @@ impl GamepadManager {
         }
 
         Ok(Self {
-            _controller_subsystem: controller_subsystem,
+            controller_subsystem,
             controller,
             state: GamepadState::default(),
         })
@@ -85,8 +86,22 @@ impl GamepadManager {
         None
     }
 
+    /// Try to connect a controller if none is currently connected
+    /// Call this periodically (e.g., every frame) for hot-plug support
+    pub fn try_connect(&mut self) {
+        if self.controller.is_none() {
+            if let Some(controller) = Self::find_controller(&self.controller_subsystem) {
+                log::info!("Gamepad connected: {}", controller.name());
+                self.controller = Some(controller);
+            }
+        }
+    }
+
     /// Update gamepad state - call this each frame after pumping SDL events
     pub fn update(&mut self) {
+        // Hot-plug: try to find a controller if we don't have one
+        self.try_connect();
+
         if let Some(ref controller) = self.controller {
             if !controller.attached() {
                 log::info!("Gamepad disconnected");
