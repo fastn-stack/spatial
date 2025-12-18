@@ -257,11 +257,44 @@ class WebGPUShell {
         this.sceneState.processCommands(commands);
     }
 
+    pollGamepads() {
+        const gamepads = navigator.getGamepads();
+        for (const gamepad of gamepads) {
+            if (!gamepad) continue;
+
+            // Format axes: [leftX, leftY, rightX, rightY, leftTrigger, rightTrigger]
+            // Standard mapping: axes 0-3 are sticks, buttons 6/7 are triggers
+            const axes = [
+                gamepad.axes[0] || 0,  // Left stick X
+                gamepad.axes[1] || 0,  // Left stick Y
+                gamepad.axes[2] || 0,  // Right stick X
+                gamepad.axes[3] || 0,  // Right stick Y
+                gamepad.buttons[6]?.value || 0,  // Left trigger
+                gamepad.buttons[7]?.value || 0,  // Right trigger
+            ];
+
+            // Format buttons: [[value, pressed], ...]
+            const buttons = gamepad.buttons.map(b => [b.value, b.pressed]);
+
+            // Send to core
+            const commands = this.core.sendGamepadEvent(axes, buttons);
+            if (commands.length > 0) {
+                this.sceneState.processCommands(commands);
+            }
+
+            // Only process first gamepad
+            break;
+        }
+    }
+
     render() {
         // Calculate delta time
         const now = performance.now();
         const dt = (now - this.lastFrameTime) / 1000.0;
         this.lastFrameTime = now;
+
+        // Poll gamepad state
+        this.pollGamepads();
 
         // Send frame event to core (handles camera movement)
         const commands = this.core.sendFrameEvent(dt);
