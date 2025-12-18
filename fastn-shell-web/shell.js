@@ -15,7 +15,24 @@ class FastnShell {
         this.depthTexture = null;
         this.vertexBuffer = null;
         this.indexBuffer = null;
-        this.rotation = 0;
+
+        // WASM state
+        this.wasm = null;
+        this.appPtr = null;
+
+        // Camera state (updated by commands from core)
+        this.camera = {
+            position: [0, 1.6, 3],
+            target: [0, 0, 0],
+            up: [0, 1, 0],
+            fov: Math.PI / 4,
+            near: 0.1,
+            far: 100.0,
+        };
+
+        // Input state
+        this.pressedKeys = new Set();
+        this.lastFrameTime = performance.now();
     }
 
     async init() {
@@ -32,16 +49,142 @@ class FastnShell {
         this.device = await adapter.requestDevice();
         this.context = this.canvas.getContext('webgpu');
 
-        const format = navigator.gpu.getPreferredCanvasFormat();
-        this.context.configure({
-            device: this.device,
-            format: format,
-            alphaMode: 'premultiplied',
-        });
+        this.format = navigator.gpu.getPreferredCanvasFormat();
 
-        await this.createPipeline(format);
+        // Set initial canvas size
+        this.resizeCanvas();
+
+        await this.createPipeline(this.format);
         this.createDepthTexture();
         this.createCubeGeometry();
+        this.setupInputHandlers();
+        this.setupResizeHandler();
+    }
+
+    resizeCanvas() {
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+
+        // Update canvas buffer size
+        this.canvas.width = width;
+        this.canvas.height = height;
+
+        // Reconfigure context with new size
+        if (this.context && this.device) {
+            this.context.configure({
+                device: this.device,
+                format: this.format,
+                alphaMode: 'premultiplied',
+            });
+        }
+    }
+
+    setupResizeHandler() {
+        window.addEventListener('resize', () => {
+            this.resizeCanvas();
+
+            // Recreate depth texture with new size
+            if (this.depthTexture) {
+                this.depthTexture.destroy();
+            }
+            this.createDepthTexture();
+        });
+    }
+
+    setupInputHandlers() {
+        // Keyboard events
+        window.addEventListener('keydown', (e) => {
+            if (!this.pressedKeys.has(e.code)) {
+                this.pressedKeys.add(e.code);
+                this.sendKeyEvent('KeyDown', e.code, e.key);
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            this.pressedKeys.delete(e.code);
+            this.sendKeyEvent('KeyUp', e.code, e.key);
+        });
+
+        // Focus canvas for keyboard events
+        this.canvas.tabIndex = 0;
+        this.canvas.focus();
+    }
+
+    sendKeyEvent(type, code, key) {
+        if (!this.wasm || this.appPtr === null) return;
+
+        // Match Rust protocol: Event uses tag="category" content="event"
+        // InputEvent uses tag="type", KeyboardEvent uses tag="action"
+        const event = {
+            category: "Input",
+            event: {
+                type: "Keyboard",
+                action: type,
+                device_id: "keyboard-0",
+                key: key,
+                code: code,
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+                repeat: false
+            }
+        };
+
+        const commands = this.sendEvent(event);
+        this.processCommands(commands);
+    }
+
+    sendFrameEvent(dt) {
+        if (!this.wasm || this.appPtr === null) return;
+
+        this.frameNumber = (this.frameNumber || 0) + 1;
+
+        // Match Rust protocol: Event uses tag="category" content="event"
+        // LifecycleEvent uses tag="type"
+        const event = {
+            category: "Lifecycle",
+            event: {
+                type: "Frame",
+                time: performance.now() / 1000.0,
+                dt: dt,
+                frame: this.frameNumber
+            }
+        };
+
+        const commands = this.sendEvent(event);
+        this.processCommands(commands);
+    }
+
+    sendEvent(event) {
+        const eventJson = JSON.stringify(event);
+        const eventBytes = new TextEncoder().encode(eventJson);
+
+        // Allocate memory in WASM for the event
+        const eventPtr = this.wasm.alloc(eventBytes.length);
+
+        // Write event to WASM memory
+        const memory = new Uint8Array(this.wasm.memory.buffer);
+        memory.set(eventBytes, eventPtr);
+
+        // Call on_event
+        this.wasm.on_event(this.appPtr, eventPtr, eventBytes.length);
+
+        // Read result
+        const resultPtr = this.wasm.get_result_ptr(this.appPtr);
+        const resultLen = this.wasm.get_result_len(this.appPtr);
+
+        if (resultLen === 0) return [];
+
+        const resultBytes = new Uint8Array(this.wasm.memory.buffer, resultPtr, resultLen);
+        const resultJson = new TextDecoder().decode(resultBytes);
+
+        try {
+            return JSON.parse(resultJson);
+        } catch (e) {
+            console.error('Failed to parse event result:', e);
+            return [];
+        }
     }
 
     async createPipeline(format) {
@@ -212,81 +355,110 @@ class FastnShell {
         const response = await fetch(wasmPath);
         const wasmBytes = await response.arrayBuffer();
 
-        // Empty imports - WASM uses its own memory
-        const importObject = {};
+        const { instance } = await WebAssembly.instantiate(wasmBytes, {});
 
-        const { instance } = await WebAssembly.instantiate(wasmBytes, importObject);
-
-        // Debug: log all exports
         console.log('WASM exports:', Object.keys(instance.exports));
 
-        // Call init_core to populate the result buffer and get pointer
-        const resultPtr = instance.exports.init_core();
+        // Store WASM exports
+        this.wasm = instance.exports;
 
-        // Call get_result_len to get the length
-        const resultLen = instance.exports.get_result_len();
+        // Call init_core to get app pointer
+        this.appPtr = this.wasm.init_core();
+        console.log(`App pointer: ${this.appPtr}`);
+
+        // Read initial commands using app pointer
+        const resultPtr = this.wasm.get_result_ptr(this.appPtr);
+        const resultLen = this.wasm.get_result_len(this.appPtr);
 
         console.log(`Result ptr: ${resultPtr}, len: ${resultLen}`);
 
-        // Read from WASM's exported memory
-        const memory = instance.exports.memory;
-        if (!memory) {
-            throw new Error('WASM does not export memory');
-        }
-        console.log('Memory buffer size:', memory.buffer.byteLength);
-
-        const jsonBytes = new Uint8Array(memory.buffer, resultPtr, resultLen);
-        const jsonStr = new TextDecoder().decode(jsonBytes);
-
-        console.log('WASM result:', jsonStr);
-
-        if (jsonStr.length === 0) {
+        if (resultLen === 0) {
             console.warn('Empty result from WASM');
             return;
         }
+
+        const jsonBytes = new Uint8Array(this.wasm.memory.buffer, resultPtr, resultLen);
+        const jsonStr = new TextDecoder().decode(jsonBytes);
+
+        console.log('WASM result:', jsonStr);
 
         const commands = JSON.parse(jsonStr);
         this.processCommands(commands);
     }
 
     processCommands(commands) {
-        for (const item of commands) {
-            const cmd = item.command;
-            if (cmd && cmd.action === 'CreateVolume') {
-                console.log('CreateVolume:', cmd);
-
-                // Extract color from material
-                let color = [1.0, 1.0, 1.0, 1.0];
-                if (cmd.material && cmd.material.color) {
-                    color = cmd.material.color;
+        for (const cmd of commands) {
+            // Handle tagged enum format: {category: "Environment", command: {action: "SetCamera", ...}}
+            if (cmd.category === "Environment" && cmd.command) {
+                if (cmd.command.action === "SetCamera") {
+                    this.camera.position = cmd.command.position;
+                    this.camera.target = cmd.command.target;
+                    this.camera.up = cmd.command.up;
+                    this.camera.fov = cmd.command.fov_degrees * Math.PI / 180;
+                    this.camera.near = cmd.command.near;
+                    this.camera.far = cmd.command.far;
+                    // console.log('Camera updated:', this.camera);
                 }
+                continue;
+            }
 
-                // Extract size from source
-                let size = 0.5;
-                if (cmd.source && cmd.source.Primitive && cmd.source.Primitive.Cube) {
-                    size = cmd.source.Primitive.Cube.size;
+            // Handle Scene commands: {category: "Scene", command: {action: "CreateVolume", ...}}
+            if (cmd.category === "Scene" && cmd.command) {
+                if (cmd.command.action === "CreateVolume") {
+                    this.handleCreateVolume(cmd.command);
                 }
-
-                // Extract transform
-                const transform = cmd.transform || {};
-                const position = transform.position || [0, 0, 0];
-                const scale = transform.scale || [1, 1, 1];
-
-                this.volumes.set(cmd.volume_id, {
-                    id: cmd.volume_id,
-                    position: position,
-                    scale: scale,
-                    size: size,
-                    color: color,
-                });
-
-                console.log('Added volume:', this.volumes.get(cmd.volume_id));
+                continue;
             }
         }
     }
 
+    handleCreateVolume(cmd) {
+        console.log('CreateVolume:', cmd);
+
+        // Extract color from material (material.color is an array)
+        let color = [1.0, 1.0, 1.0, 1.0];
+        if (cmd.material && cmd.material.color) {
+            color = cmd.material.color;
+        }
+
+        // Extract size from source - tagged enum format: {Primitive: {Cube: {size: 0.5}}}
+        let size = 0.5;
+        if (cmd.source && cmd.source.Primitive) {
+            if (cmd.source.Primitive.Cube) {
+                size = cmd.source.Primitive.Cube.size;
+            } else if (cmd.source.Primitive.Sphere) {
+                size = cmd.source.Primitive.Sphere.radius * 2;
+            } else if (cmd.source.Primitive.Box) {
+                size = Math.max(cmd.source.Primitive.Box.width,
+                               cmd.source.Primitive.Box.height,
+                               cmd.source.Primitive.Box.depth);
+            }
+        }
+
+        // Extract transform
+        const transform = cmd.transform || {};
+        const position = transform.position || [0, 0, 0];
+        const scale = transform.scale || [1, 1, 1];
+
+        this.volumes.set(cmd.volume_id, {
+            id: cmd.volume_id,
+            position: position,
+            scale: scale,
+            size: size,
+            color: color,
+        });
+
+        console.log('Added volume:', this.volumes.get(cmd.volume_id));
+    }
+
     render() {
-        // No automatic rotation - app controls animation via update loops
+        // Calculate delta time
+        const now = performance.now();
+        const dt = (now - this.lastFrameTime) / 1000.0; // Convert to seconds
+        this.lastFrameTime = now;
+
+        // Send frame event to core (handles camera movement)
+        this.sendFrameEvent(dt);
 
         const commandEncoder = this.device.createCommandEncoder();
         const textureView = this.context.getCurrentTexture().createView();
@@ -330,12 +502,11 @@ class FastnShell {
 
     createMVP(volume) {
         const aspect = this.canvas.width / this.canvas.height;
-        const fov = Math.PI / 4;
-        const near = 0.1;
-        const far = 100.0;
 
-        // Perspective projection (matches native: perspective_rh)
-        const f = 1.0 / Math.tan(fov / 2);
+        // Perspective projection using camera settings
+        const f = 1.0 / Math.tan(this.camera.fov / 2);
+        const near = this.camera.near;
+        const far = this.camera.far;
         const projection = new Float32Array([
             f / aspect, 0, 0, 0,
             0, f, 0, 0,
@@ -343,11 +514,10 @@ class FastnShell {
             0, 0, (2 * far * near) / (near - far), 0,
         ]);
 
-        // View matrix using look_at_rh (matches native camera)
-        // Camera at (0, 1.6, 3) looking at origin
-        const view = this.lookAtRH([0, 1.6, 3], [0, 0, 0], [0, 1, 0]);
+        // View matrix using camera position and target
+        const view = this.lookAtRH(this.camera.position, this.camera.target, this.camera.up);
 
-        // Model matrix (scale + position from volume, no rotation)
+        // Model matrix (scale + position from volume)
         const s = volume.size;
         const model = new Float32Array([
             s, 0, 0, 0,
@@ -427,6 +597,7 @@ async function main() {
         shell.render();
 
         console.log('fastn-shell-web running');
+        console.log('Controls: WASD=move, IJKL=rotate, QE=up/down, 0=reset');
     } catch (e) {
         console.error(e);
         errorDiv.textContent = e.message;
