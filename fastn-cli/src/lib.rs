@@ -148,9 +148,14 @@ fn get_crate_info() -> Result<CrateInfo, String> {
         .ok_or("Could not find packages in cargo metadata")?;
 
     // Filter to packages that have cdylib target (i.e., are fastn apps)
+    // Exclude "fastn" itself since it's a library, not an app
     let cdylib_packages: Vec<_> = packages
         .iter()
         .filter(|pkg| {
+            // Skip the fastn library itself
+            if pkg.get("name").and_then(|v| v.as_str()) == Some("fastn") {
+                return false;
+            }
             pkg.get("targets")
                 .and_then(|t| t.as_array())
                 .map(|targets| {
