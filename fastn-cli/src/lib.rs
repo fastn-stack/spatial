@@ -313,6 +313,8 @@ fn build_wasm(crate_info: &CrateInfo, release: bool) -> Result<PathBuf, String> 
     let mut cmd = Command::new("cargo");
     cmd.arg("build")
         .arg("--lib") // Only build library target (not binary)
+        .arg("-p")
+        .arg(&crate_info.name) // Specify the package to avoid building workspace deps
         .arg("--target")
         .arg("wasm32-unknown-unknown");
 
@@ -321,7 +323,8 @@ fn build_wasm(crate_info: &CrateInfo, release: bool) -> Result<PathBuf, String> 
     }
 
     println!(
-        "  Running cargo build --lib --target wasm32-unknown-unknown{}",
+        "  Running cargo build --lib -p {} --target wasm32-unknown-unknown{}",
+        crate_info.name,
         if release { " --release" } else { "" }
     );
 
