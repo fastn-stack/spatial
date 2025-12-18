@@ -29,11 +29,66 @@
             max-width: 600px;
             text-align: center;
         }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #888;
+            font-family: monospace;
+            font-size: 14px;
+        }
     </style>
 </head>
 <body>
     <canvas id="canvas"></canvas>
     <div id="error"></div>
-    <script type="module" src="shell.js"></script>
+    <div id="loading">Detecting platform...</div>
+
+    <!-- Load shared modules first -->
+    <script src="shell-common.js"></script>
+
+    <!-- Platform detection and shell loading -->
+    <script>
+        async function main() {
+            const loadingDiv = document.getElementById('loading');
+            const errorDiv = document.getElementById('error');
+
+            try {
+                // Detect platform
+                const platform = await detectPlatform();
+                console.log('Detected platform:', platform);
+                loadingDiv.textContent = `Loading ${platform} shell...`;
+
+                if (platform === 'webgl-xr') {
+                    // Load WebGL+XR shell for VR headsets
+                    await loadScript('shell-webgl-xr.js');
+                    loadingDiv.style.display = 'none';
+                    await initWebGLXR();
+                } else {
+                    // Load WebGPU shell for desktop/laptop
+                    await loadScript('shell-webgpu.js');
+                    loadingDiv.style.display = 'none';
+                    await initWebGPU();
+                }
+            } catch (e) {
+                console.error('Failed to initialize:', e);
+                loadingDiv.style.display = 'none';
+                errorDiv.textContent = e.message;
+            }
+        }
+
+        function loadScript(src) {
+            return new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                script.src = src;
+                script.onload = resolve;
+                script.onerror = () => reject(new Error(`Failed to load ${src}`));
+                document.body.appendChild(script);
+            });
+        }
+
+        main();
+    </script>
 </body>
 </html>
