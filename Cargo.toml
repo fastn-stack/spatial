@@ -1,5 +1,6 @@
 [workspace]
 members = ["fastn", "fastn-cli", "fastn-macros", "fastn-protocol", "fastn-shell", "examples/*"]
+exclude = ["quest-test"]
 resolver = "2"
 
 

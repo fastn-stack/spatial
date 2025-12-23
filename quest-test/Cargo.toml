@@ -1,0 +1,56 @@
+[package]
+name = "quest-test"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone test app for Quest OpenXR + Passthrough AR"
+
+[workspace]
+
+[dependencies]
+openxr = "0.19"
+ash = "0.38"
+log = "0.4"
+env_logger = "0.11"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }
+android_logger = "0.15"
+ndk-context = "0.1"
+libloading = "0.8"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "quest-test"
+path = "src/main.rs"
+
+[package.metadata.android]
+package = "com.fastn.questtest"
+build_targets = ["aarch64-linux-android"]
+runtime_libs = "libs"
+
+[package.metadata.android.sdk]
+min_sdk_version = 29
+target_sdk_version = 32
+
+# Quest VR requirements
+[[package.metadata.android.uses_feature]]
+name = "android.hardware.vr.headtracking"
+required = true
+version = 1
+
+# Oculus/Meta VR metadata
+[[package.metadata.android.application.meta_data]]
+name = "com.oculus.vr.focusaware"
+value = "true"
+
+[[package.metadata.android.application.meta_data]]
+name = "com.oculus.supportedDevices"
+value = "quest|quest2|questpro|quest3"
+
+# VR intent filter for main activity
+[[package.metadata.android.application.activity.intent_filter]]
+actions = ["android.intent.action.MAIN"]
+categories = ["android.intent.category.LAUNCHER", "com.oculus.intent.category.VR"]
