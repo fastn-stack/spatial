@@ -330,7 +330,6 @@ Each ACL WASM module can have a corresponding `.hubs` file that lists authorized
 - `_access.hubs` - lists hubs that can pass `_access.wasm` ACL
 - `_read.hubs` - lists hubs for `_read.wasm` checks
 - `_write.hubs` - lists hubs for `_write.wasm` checks
-- `_db.hubs` - lists hubs for `_db.wasm` database access
 - `_admin.hubs` - lists hubs for `_admin.wasm` admin access
 
 The `.hubs` file provides a declarative list that the WASM module can query. This enables simple ACL patterns without hardcoding hub IDs in WASM:
@@ -359,13 +358,18 @@ EFGH...ABC: bob  # inline comment
 
 ### Unified Namespace
 
-Files and KV keys share the same namespace and are subject to the same ACL rules:
+Files, KV keys, and databases share the same namespace and are subject to the same ACL rules:
 
-- A `_access.wasm` at `foo/` controls access to both:
+- A `_access.wasm` at `foo/` controls access to:
   - Files: `foo/bar.txt`, `foo/baz/file.json`, etc.
   - KV keys: `foo/counter`, `foo/settings`, etc.
+  - Databases: `foo/data.sqlite3` (SELECT = read, INSERT/UPDATE/DELETE = write)
 
 - More specific ACL files (`_read.wasm`, `_write.wasm`) take precedence over `_access.wasm`
+
+- Database operations map to read/write:
+  - **Read operations**: `db_query` (SELECT)
+  - **Write operations**: `db_execute` (INSERT, UPDATE, DELETE), `db_begin`, `db_commit`, `db_rollback`
 
 ### Admin Access (Modifying ACL)
 
@@ -389,7 +393,19 @@ mykosha/
 
 1. **No path collision**: The same path cannot be used as both a file and a KV key. If `foo/bar` exists as a file, you cannot use `foo/bar` as a KV key (and vice versa).
 
-2. **Hierarchical checking**: ACL is checked from root to the target path. Any denial at any level stops access immediately.
+2. **Hierarchical checking (like Linux permissions)**: ACL is checked from root to the target path. Each level must grant access before proceeding to the next. Any denial stops access immediately.
+
+   For a request to `api/data/users.sqlite3`:
+   ```
+   1. Check root kosha ACL (FASTN_HOME/koshas/root/files/_access.wasm)
+   2. Check target kosha root (_access.wasm at kosha root)
+   3. Check api/_access.wasm (or _read/_write.wasm)
+   4. Check api/data/_access.wasm (or _read/_write.wasm)
+   5. Access granted only if ALL checks pass
+   ```
+
+   If no ACL file exists at a level, that level is skipped (implicitly allowed).
+   If a `.hubs` file exists without a `.wasm` file, the hub list is checked directly.
 
 3. **ACL module signature**: Each ACL WASM module exports an `allowed(ctx_json: &str) -> bool` function that receives the access context (spoke ID, command, path, etc.).
 
@@ -439,12 +455,11 @@ Any file with `.sqlite3` extension in the kosha is treated as a SQLite database.
 ├── files/
 │   ├── users.sqlite3           # Database in root
 │   ├── api/
-│   │   ├── _db.wasm            # ACL for databases in api/ (optional)
-│   │   ├── _db.hubs            # Hubs authorized for database access in api/
+│   │   ├── _read.wasm          # Read ACL (controls db_query)
+│   │   ├── _write.wasm         # Write ACL (controls db_execute)
 │   │   └── analytics.sqlite3   # Database in api/
 │   └── private/
-│       ├── _db.wasm            # ACL for databases in private/
-│       ├── _db.hubs            # Hubs authorized for database access in private/
+│       ├── _access.wasm        # Access ACL for private/*
 │       └── data.sqlite3        # Database in private/
 ├── history/
 └── kv/
@@ -489,25 +504,16 @@ kosha.db_commit(tx_id).await?;
 
 ### Database ACL
 
-Database connections are controlled by `_db.wasm` in the same directory as the database (or parent directories, cascading up):
+Databases use the same ACL as files. The `resource_type` field in `AccessContext` indicates when a database is being accessed:
 
-```rust
-// _db.wasm receives DbAccessContext:
-pub struct DbAccessContext {
-    pub requester_hub_id: String,  // Hub ID of the requesting spoke
-    pub current_hub_id: String,    // This hub's ID
-    pub database: String,          // Database path (e.g., "api/analytics.sqlite3")
-    pub operation: String,         // "query", "execute", "begin", "commit", "rollback"
-}
-
-// Returns: bool (allow/deny)
-fn allowed(ctx: &DbAccessContext) -> bool { ... }
-```
+- `db_query` (SELECT) → checks `_read.wasm` / `_read.hubs`
+- `db_execute` (INSERT/UPDATE/DELETE) → checks `_write.wasm` / `_write.hubs`
+- `db_begin`, `db_commit`, `db_rollback` → checks `_write.wasm` / `_write.hubs`
 
 ACL resolution for `api/analytics.sqlite3`:
-1. Check `api/_db.wasm`
-2. If not found, check `_db.wasm` (root)
-3. If no `_db.wasm` found, follow regular file ACL rules (`_access.wasm`, `_read.wasm`, `_write.wasm`)
+1. Check `api/_read.wasm` (for query) or `api/_write.wasm` (for execute)
+2. If not found, check parent directories up to root
+3. Fall back to `_access.wasm` if no specific read/write ACL exists
 
 ## WASM Execution Context
 
@@ -523,7 +529,8 @@ pub struct AccessContext {
     pub app: String,               // Application (e.g., "kosha")
     pub instance: String,          // Instance name (e.g., kosha alias)
     pub command: String,           // Command being executed
-    pub path: Option<String>,      // Path for file operations
+    pub resource_type: String,     // "file", "db", or "kv"
+    pub path: String,              // Full path to the resource being accessed
 }
 
 // Check if request is from the same user (hub owner)
