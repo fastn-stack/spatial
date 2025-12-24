@@ -1,0 +1,16 @@
+[package]
+name = "fastn-spoke"
+version = "0.1.0"
+edition = "2024"
+description = "Spoke client for fastn P2P network - connects to hubs and accesses koshas"
+
+[dependencies]
+fastn-net = { path = "../fastn-net" }
+fastn-hub = { path = "../fastn-hub" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1", features = ["fs", "io-util", "sync"] }
+chrono = { version = "0.4", features = ["serde"] }
+directories = "6.0"
+dirs = "6.0"
