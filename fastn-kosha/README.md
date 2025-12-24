@@ -202,19 +202,155 @@ pub struct DirEntry {
 }
 ```
 
+## Read/Write vs Get/Post
+
+Kosha provides two sets of operations with different semantics:
+
+### Read/Write - Raw Byte Operations
+
+For directly manipulating file content as bytes. Uses **exact paths** - no fallback logic, no WASM execution.
+
+```rust
+// Read raw bytes - exact path only
+kosha.read_file("config.json").await?  // Returns: Vec<u8>
+kosha.read_file("index.wasm").await?   // Returns raw WASM bytes, NOT executed
+
+// Write raw bytes
+kosha.write_file("config.json", bytes).await?
+```
+
+**Key points:**
+- `read_file("index.wasm")` returns the raw WASM bytes, it does NOT execute the WASM
+- `read_file("foo/")` would fail - directories have no raw bytes
+- No content-type handling, no caching headers
+
+### Get/Post - HTTP-like Semantics
+
+For HTTP-style requests with content-type handling, WASM execution, and caching.
+Uses **fallback logic** for path resolution.
+
+```rust
+// Get with content-type and caching
+kosha.get("config.json").await?
+// Returns: Response { content_type: "application/json", body: ..., cache_control: Some(...) }
+
+// Get directory - uses fallback logic
+kosha.get("api/").await?
+// Tries: api.wasm → api/index.wasm → 404
+
+// Post with payload
+kosha.post("api/users", payload).await?
+// Returns: Response
+```
+
+**Key points:**
+- `get("index.wasm")` executes the WASM and returns its response
+- `get("api/")` uses fallback logic: `api.wasm` then `api/index.wasm`
+- Response includes cache headers (cache_control, etag) that clients can use
+- WASM modules can set their own cache headers in the response
+
+### WASM Execution via Get/Post
+
+Any `.wasm` file (except `_`-prefixed special files) can handle get/post requests:
+
+1. **Direct WASM**: `foo.wasm` handles requests to `/foo.wasm`
+2. **File Handler**: `foo.json.wasm` handles requests to `/foo.json`
+3. **Directory Handler**: For `/foo/`, tries `foo.wasm` then `foo/index.wasm`
+
+**Important Constraints**:
+- `foo.json` and `foo.json.wasm` cannot both exist (write/rename fails if conflict)
+- `foo.wasm` and `foo/index.wasm` cannot both exist
+
+```rust
+// Request to /api/data.json
+// If api/data.json.wasm exists → execute it
+// Else if api/data.json exists → return with content-type: application/json
+
+// Request to /api/users/
+// If api/users.wasm exists → execute it
+// Else if api/users/index.wasm exists → execute it
+// Else → 404
+```
+
+### Response Type
+
+Get/Post operations return a `Response` with optional caching headers:
+
+```rust
+pub struct Response {
+    pub content_type: String,
+    pub body: ResponseBody,
+    pub cache_control: Option<String>,  // e.g., "max-age=3600", "no-cache"
+    pub etag: Option<String>,           // For conditional requests
+}
+
+pub enum ResponseBody {
+    /// Raw bytes
+    Bytes(Vec<u8>),
+    /// JSON value
+    Json(serde_json::Value),
+    /// Redirect to another path
+    Redirect(String),
+    /// Not found
+    NotFound,
+}
+```
+
+WASM modules can set cache headers in their response:
+```rust
+Response::json(data)
+    .with_cache_control("max-age=3600")
+    .with_etag("abc123")
+```
+
+### Content-Type Mapping
+
+For static files, content-type is derived from extension:
+- `.json` → `application/json`
+- `.html` → `text/html`
+- `.txt` → `text/plain`
+- `.png` → `image/png`
+- etc.
+
 ## Access Control (ACL)
 
-Access control is managed via WASM modules stored in the kosha itself. ACL modules can be placed at any folder level and apply to everything within that folder.
+Access control is managed via special WASM modules (prefixed with `_`) stored in the kosha itself. ACL modules can be placed at any folder level and apply to everything within that folder.
+
+**Special files** (prefixed with `_`) are reserved for system use:
+- `_access.wasm` - General access control
+- `_read.wasm` - Read access control
+- `_write.wasm` - Write access control
+- `_admin.wasm` - Admin access (for modifying ACL files)
+
+Note: `index.wasm` is NOT a special file - it's a regular executable used for directory handling.
 
 ### Unified Namespace
 
 Files and KV keys share the same namespace and are subject to the same ACL rules:
 
-- An `access.wasm` at `foo/` controls access to both:
+- A `_access.wasm` at `foo/` controls access to both:
   - Files: `foo/bar.txt`, `foo/baz/file.json`, etc.
   - KV keys: `foo/counter`, `foo/settings`, etc.
 
-- More specific ACL files (`read.wasm`, `write.wasm`) take precedence over `access.wasm`
+- More specific ACL files (`_read.wasm`, `_write.wasm`) take precedence over `_access.wasm`
+
+### Admin Access (Modifying ACL)
+
+ACL WASM files (`_access.wasm`, `_read.wasm`, `_write.wasm`) are protected by `_admin.wasm`:
+
+- To create, modify, or delete any ACL file at `foo/_access.wasm`, the system checks `foo/_admin.wasm`
+- If no `_admin.wasm` exists at that level, it checks parent directories up to root
+- If no `_admin.wasm` exists anywhere, only the hub owner can modify ACL files
+
+```
+mykosha/
+├── src/
+│   ├── _admin.wasm          # Controls who can modify ACL at root and below
+│   ├── _access.wasm         # Protected by _admin.wasm
+│   └── private/
+│       ├── _admin.wasm      # Can override root admin for private/*
+│       └── _access.wasm     # Protected by private/_admin.wasm
+```
 
 ### Important Constraints
 
@@ -222,23 +358,160 @@ Files and KV keys share the same namespace and are subject to the same ACL rules
 
 2. **Hierarchical checking**: ACL is checked from root to the target path. Any denial at any level stops access immediately.
 
-3. **ACL module signature**: Each WASM module exports an `allowed(ctx_json: &str) -> bool` function that receives the access context (spoke ID, command, path, etc.).
+3. **ACL module signature**: Each ACL WASM module exports an `allowed(ctx_json: &str) -> bool` function that receives the access context (spoke ID, command, path, etc.).
+
+4. **Admin protection**: Writes to special `_*.wasm` files require admin permission checked via `_admin.wasm`.
+
+5. **Reserved prefix**: Files starting with `_` are reserved for system use. Regular `.wasm` files (without `_` prefix) are user-executable.
 
 ### Example
 
 ```
 mykosha/
 ├── src/
-│   ├── public/
-│   │   └── readme.txt
+│   ├── _access.wasm         # Root ACL
+│   ├── api.wasm             # Handles GET/POST /api/ (alternative to api/index.wasm)
+│   ├── api/
+│   │   ├── _read.wasm       # Read ACL for api/*
+│   │   ├── users.wasm       # Handles GET/POST /api/users/
+│   │   ├── config.json      # Static file: GET returns with content-type: application/json
+│   │   └── data/
+│   │       ├── index.wasm   # Handles GET/POST /api/data/
+│   │       └── stats.json.wasm  # Handles GET/POST /api/data/stats.json (dynamic)
 │   └── private/
-│       ├── access.wasm      # Controls all access to private/*
-│       ├── secrets.txt
+│       ├── _access.wasm     # Controls all access to private/*
+│       ├── secrets.txt      # Static file
 │       └── config/
-│           └── write.wasm   # Additional write restrictions for config/*
+│           └── _write.wasm  # Additional write restrictions for config/*
 └── kv/
-    └── store.dson           # Keys like "private/counter" also checked by private/access.wasm
+    └── store.dson           # Keys like "private/counter" also checked by private/_access.wasm
 ```
+
+Note: In the above example:
+- `api/data/stats.json.wasm` handles requests for `/api/data/stats.json`
+- `api/data/stats.json` must NOT exist (conflict error on write/rename)
+
+## SQLite Databases
+
+Any file with `.sqlite3` extension in the kosha is treated as a SQLite database. Databases can be placed anywhere in the file hierarchy.
+
+### Directory Structure
+
+```
+<kosha-path>/
+├── src/
+│   ├── users.sqlite3           # Database in root
+│   ├── api/
+│   │   ├── _db.wasm            # ACL for databases in api/ (optional)
+│   │   └── analytics.sqlite3   # Database in api/
+│   └── private/
+│       ├── _db.wasm            # ACL for databases in private/
+│       └── data.sqlite3        # Database in private/
+├── history/
+└── kv/
+```
+
+### Database Operations
+
+```rust
+// Query (read-only, returns rows)
+kosha.db_query("users.sqlite3", "SELECT * FROM users WHERE id = ?", params![1]).await?
+// Returns: Vec<Row>
+
+// Query in subdirectory
+kosha.db_query("api/analytics.sqlite3", "SELECT * FROM events", params![]).await?
+
+// Execute (write, returns affected rows)
+kosha.db_execute("users.sqlite3", "INSERT INTO users (name) VALUES (?)", params!["Alice"]).await?
+// Returns: usize (rows affected)
+```
+
+### Transactions
+
+Transactions provide atomic multi-statement operations:
+
+```rust
+// Begin a transaction (returns transaction ID)
+let tx_id = kosha.db_begin("users.db").await?;
+
+// Execute within transaction
+kosha.db_tx_execute(tx_id, "INSERT INTO users (name) VALUES (?)", params!["Alice"]).await?;
+kosha.db_tx_execute(tx_id, "UPDATE counters SET count = count + 1", params![]).await?;
+
+// Commit (or rollback)
+kosha.db_commit(tx_id).await?;
+// kosha.db_rollback(tx_id).await?;
+```
+
+**Transaction Limits:**
+- Maximum transaction duration: configurable (default 30 seconds)
+- Transactions that exceed the limit are automatically rolled back
+- Hub serializes all write operations - no concurrent write issues
+
+### Database ACL
+
+Database connections are controlled by `_db.wasm` in the same directory as the database (or parent directories, cascading up):
+
+```rust
+// _db.wasm receives DbAccessContext:
+pub struct DbAccessContext {
+    pub requester_hub_id: String,  // Hub ID of the requesting spoke
+    pub current_hub_id: String,    // This hub's ID
+    pub database: String,          // Database path (e.g., "api/analytics.sqlite3")
+    pub operation: String,         // "query", "execute", "begin", "commit", "rollback"
+}
+
+// Returns: bool (allow/deny)
+fn allowed(ctx: &DbAccessContext) -> bool { ... }
+```
+
+ACL resolution for `api/analytics.sqlite3`:
+1. Check `api/_db.wasm`
+2. If not found, check `_db.wasm` (root)
+3. If no `_db.wasm` found, follow regular file ACL rules (`_access.wasm`, `_read.wasm`, `_write.wasm`)
+
+## WASM Execution Context
+
+All WASM modules (ACL and get/post handlers) receive context about the request:
+
+### Access Control Context
+
+```rust
+pub struct AccessContext {
+    pub requester_hub_id: String,  // Hub ID of the requesting spoke
+    pub current_hub_id: String,    // This hub's ID (same = local user)
+    pub spoke_id52: String,        // Spoke's public key ID
+    pub app: String,               // Application (e.g., "kosha")
+    pub instance: String,          // Instance name (e.g., kosha alias)
+    pub command: String,           // Command being executed
+    pub path: Option<String>,      // Path for file operations
+}
+
+// Check if request is from the same user (hub owner)
+fn is_owner(ctx: &AccessContext) -> bool {
+    ctx.requester_hub_id == ctx.current_hub_id
+}
+```
+
+### Get/Post Handler Context
+
+```rust
+pub struct RequestContext {
+    pub requester_hub_id: String,  // Hub ID of the requesting spoke
+    pub current_hub_id: String,    // This hub's ID
+    pub spoke_id52: String,        // Spoke's public key ID
+    pub method: String,            // "GET" or "POST"
+    pub path: String,              // Request path
+    pub query: Option<String>,     // Query string
+    pub payload: Option<Value>,    // POST payload (JSON)
+}
+```
+
+### Hub Identity Model
+
+- Each user has their own hub (hubs are not shared)
+- `requester_hub_id == current_hub_id` means the request is from the hub owner
+- This enables simple "is owner" checks for private data
 
 ## Design Notes
 
@@ -247,3 +520,5 @@ mykosha/
 - **CRDT merges**: When koshas sync between hubs, the dson KV store can merge without conflicts.
 - **Spoke access**: Spokes access koshas through the hub API, not directly on disk.
 - **Unified namespace**: Files and KV keys share the same path namespace for consistent ACL enforcement.
+- **Serialized writes**: Hub serializes all write operations (files, KV, SQLite) - no concurrent write issues.
+- **One hub per user**: Each user runs their own hub, simplifying ownership checks.

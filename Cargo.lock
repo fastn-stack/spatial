@@ -1460,6 +1460,7 @@ dependencies = [
  "dirs",
  "fastn-kosha",
  "fastn-net",
+ "rand 0.8.5",
  "serde",
  "serde_json",
  "thiserror 2.0.17",

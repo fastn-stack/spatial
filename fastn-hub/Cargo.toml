@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Hub server for fastn P2P network - manages koshas and authenticated spokes"
 
+[[bin]]
+name = "fastn-hub"
+path = "src/main.rs"
+
 [dependencies]
 fastn-net = { path = "../fastn-net" }
 fastn-kosha = { path = "../fastn-kosha" }
@@ -14,3 +18,4 @@ tokio = { version = "1", features = ["fs", "io-util", "sync", "rt-multi-thread",
 chrono = { version = "0.4", features = ["serde"] }
 directories = "6.0"
 dirs = "6.0"
+rand = "0.8"

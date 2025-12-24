@@ -25,9 +25,131 @@ pub enum Error {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("Conflict: {0}")]
+    Conflict(String),
+
+    #[error("WASM execution error: {0}")]
+    WasmExecution(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+// ============================================================================
+// Response types for get/post operations
+// ============================================================================
+
+/// Response from get/post operations
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Response {
+    /// Content type (e.g., "application/json", "text/html")
+    pub content_type: String,
+    /// Response body
+    pub body: ResponseBody,
+    /// Optional cache control header (e.g., "max-age=3600", "no-cache")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<String>,
+    /// Optional ETag for conditional requests
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub etag: Option<String>,
+}
+
+/// Response body variants
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ResponseBody {
+    /// Raw bytes (base64 encoded in JSON)
+    Bytes(Vec<u8>),
+    /// JSON value
+    Json(serde_json::Value),
+    /// Redirect to another path
+    Redirect(String),
+    /// Not found
+    NotFound,
+}
+
+impl Response {
+    /// Create a JSON response
+    pub fn json(value: serde_json::Value) -> Self {
+        Self {
+            content_type: "application/json".to_string(),
+            body: ResponseBody::Json(value),
+            cache_control: None,
+            etag: None,
+        }
+    }
+
+    /// Create a bytes response with content type
+    pub fn bytes(content_type: &str, data: Vec<u8>) -> Self {
+        Self {
+            content_type: content_type.to_string(),
+            body: ResponseBody::Bytes(data),
+            cache_control: None,
+            etag: None,
+        }
+    }
+
+    /// Create a redirect response
+    pub fn redirect(path: &str) -> Self {
+        Self {
+            content_type: "".to_string(),
+            body: ResponseBody::Redirect(path.to_string()),
+            cache_control: None,
+            etag: None,
+        }
+    }
+
+    /// Create a not found response
+    pub fn not_found() -> Self {
+        Self {
+            content_type: "".to_string(),
+            body: ResponseBody::NotFound,
+            cache_control: None,
+            etag: None,
+        }
+    }
+
+    /// Set cache control header
+    pub fn with_cache_control(mut self, cache_control: &str) -> Self {
+        self.cache_control = Some(cache_control.to_string());
+        self
+    }
+
+    /// Set ETag header
+    pub fn with_etag(mut self, etag: &str) -> Self {
+        self.etag = Some(etag.to_string());
+        self
+    }
+}
+
+/// Get content type from file extension
+pub fn content_type_for_extension(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext.to_lowercase().as_str() {
+        "json" => "application/json",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "txt" => "text/plain",
+        "xml" => "application/xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "wasm" => "application/wasm",
+        "glb" => "model/gltf-binary",
+        "gltf" => "model/gltf+json",
+        _ => "application/octet-stream",
+    }
+}
 
 /// A file version in history
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +248,107 @@ impl Kosha {
     /// Delete a key from the KV store
     pub async fn kv_delete(&self, _key: &str) -> Result<()> {
         todo!("kv_delete")
+    }
+
+    // ========================================================================
+    // Get/Post operations - HTTP-like semantics with WASM execution
+    // ========================================================================
+
+    /// Handle a GET request with HTTP-like semantics
+    ///
+    /// Resolution order:
+    /// 1. If path ends with `/`, try `{path}.wasm`, then `{path}index.wasm`
+    /// 2. If `{path}.wasm` exists, execute it
+    /// 3. Otherwise, serve static file with appropriate content-type
+    pub async fn get(&self, _path: &str) -> Result<Response> {
+        todo!("get")
+    }
+
+    /// Handle a POST request with HTTP-like semantics
+    ///
+    /// Resolution order (same as GET):
+    /// 1. If path ends with `/`, try `{path}.wasm`, then `{path}index.wasm`
+    /// 2. If `{path}.wasm` exists, execute it with payload
+    /// 3. Otherwise, error (can't POST to static files)
+    pub async fn post(&self, _path: &str, _payload: serde_json::Value) -> Result<Response> {
+        todo!("post")
+    }
+
+    /// Check if writing to a path would create a conflict
+    ///
+    /// Returns error if:
+    /// - Writing `foo.json` when `foo.json.wasm` exists
+    /// - Writing `foo.json.wasm` when `foo.json` exists
+    /// - Writing `foo.wasm` when `foo/index.wasm` exists
+    /// - Writing `foo/index.wasm` when `foo.wasm` exists
+    pub async fn check_write_conflict(&self, _path: &str) -> Result<()> {
+        todo!("check_write_conflict")
+    }
+
+    // ========================================================================
+    // SQLite database operations
+    // ========================================================================
+
+    /// Execute a read-only query on a database
+    ///
+    /// Returns rows as JSON arrays
+    pub async fn db_query(
+        &self,
+        _database: &str,
+        _sql: &str,
+        _params: Vec<serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>> {
+        todo!("db_query")
+    }
+
+    /// Execute a write statement on a database
+    ///
+    /// Returns the number of affected rows
+    pub async fn db_execute(
+        &self,
+        _database: &str,
+        _sql: &str,
+        _params: Vec<serde_json::Value>,
+    ) -> Result<usize> {
+        todo!("db_execute")
+    }
+
+    /// Begin a database transaction
+    ///
+    /// Returns a transaction ID. Transactions have a maximum duration
+    /// (default 30 seconds) after which they are automatically rolled back.
+    pub async fn db_begin(&self, _database: &str) -> Result<String> {
+        todo!("db_begin")
+    }
+
+    /// Execute a statement within a transaction
+    pub async fn db_tx_execute(
+        &self,
+        _tx_id: &str,
+        _sql: &str,
+        _params: Vec<serde_json::Value>,
+    ) -> Result<usize> {
+        todo!("db_tx_execute")
+    }
+
+    /// Query within a transaction
+    pub async fn db_tx_query(
+        &self,
+        _tx_id: &str,
+        _sql: &str,
+        _params: Vec<serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>> {
+        todo!("db_tx_query")
+    }
+
+    /// Commit a transaction
+    pub async fn db_commit(&self, _tx_id: &str) -> Result<()> {
+        todo!("db_commit")
+    }
+
+    /// Rollback a transaction
+    pub async fn db_rollback(&self, _tx_id: &str) -> Result<()> {
+        todo!("db_rollback")
     }
 }
 

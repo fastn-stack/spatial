@@ -107,16 +107,89 @@ impl Hub {
         &self.home
     }
 
-    // Stub implementations - to be filled in
-
     /// Initialize a new hub
+    ///
+    /// Creates FASTN_HOME directory, generates a new secret key,
+    /// and saves the configuration.
     pub async fn init() -> Result<Self> {
-        todo!("Hub::init")
+        let home = Self::home_dir();
+
+        // Check if already initialized
+        if Self::is_initialized() {
+            return Err(Error::Io(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("Hub already initialized at {:?}", home),
+            )));
+        }
+
+        // Create home directory
+        tokio::fs::create_dir_all(&home).await?;
+
+        // Generate new secret key
+        let secret_key = SecretKey::generate(&mut rand::thread_rng());
+        let public_key = secret_key.public();
+        let hub_id52 = fastn_net::to_id52(&public_key);
+
+        // Save secret key
+        let key_path = home.join("hub.key");
+        let key_bytes = secret_key.to_bytes();
+        tokio::fs::write(&key_path, key_bytes).await?;
+
+        // Create and save config
+        let config = HubConfig {
+            hub_id52,
+            created_at: Utc::now(),
+        };
+        let config_path = home.join("config.json");
+        let config_json = serde_json::to_string_pretty(&config)?;
+        tokio::fs::write(&config_path, config_json).await?;
+
+        // Create koshas directory
+        tokio::fs::create_dir_all(home.join("koshas")).await?;
+
+        Ok(Self {
+            home,
+            secret_key,
+            config,
+            koshas: HashMap::new(),
+            acls: HashMap::new(),
+        })
     }
 
     /// Load an existing hub
+    ///
+    /// Loads the secret key and configuration from FASTN_HOME.
     pub async fn load() -> Result<Self> {
-        todo!("Hub::load")
+        let home = Self::home_dir();
+
+        // Check if initialized
+        if !Self::is_initialized() {
+            return Err(Error::NotInitialized);
+        }
+
+        // Load secret key
+        let key_path = home.join("hub.key");
+        let key_bytes = tokio::fs::read(&key_path).await?;
+        let key_array: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid key file: expected 32 bytes",
+            )))?;
+        let secret_key = SecretKey::from_bytes(&key_array);
+
+        // Load config
+        let config_path = home.join("config.json");
+        let config_json = tokio::fs::read_to_string(&config_path).await?;
+        let config: HubConfig = serde_json::from_str(&config_json)?;
+
+        Ok(Self {
+            home,
+            secret_key,
+            config,
+            koshas: HashMap::new(),
+            acls: HashMap::new(),
+        })
     }
 
     /// Load or initialize hub
@@ -181,12 +254,23 @@ impl Hub {
     ///
     /// Routes based on hardcoded app names:
     /// - "kosha": routes to registered koshas
-    pub async fn handle_request(&self, spoke_id52: &str, request: Request) -> std::result::Result<Response, HubError> {
+    ///
+    /// The `requester_hub_id` is the hub ID of the spoke making the request.
+    /// Each user has their own hub, so requester_hub_id == self.id52() means
+    /// the request is from the hub owner.
+    pub async fn handle_request(
+        &self,
+        spoke_id52: &str,
+        requester_hub_id: &str,
+        request: Request,
+    ) -> std::result::Result<Response, HubError> {
         // Extract path from payload for file operations (used in ACL checks)
         let path = Self::extract_path_from_payload(&request.command, &request.payload);
 
-        // Build access context
+        // Build access context with hub IDs
         let ctx = AccessContext {
+            requester_hub_id: requester_hub_id.to_string(),
+            current_hub_id: self.config.hub_id52.clone(),
             spoke_id52: spoke_id52.to_string(),
             app: request.app.clone(),
             instance: request.instance.clone(),
@@ -237,9 +321,51 @@ impl Hub {
         }
     }
 
+    /// Get the secret key
+    pub fn secret_key(&self) -> &SecretKey {
+        &self.secret_key
+    }
+
     /// Run the hub server
-    pub async fn serve(&self) -> Result<()> {
-        todo!("Hub::serve")
+    ///
+    /// Starts the iroh endpoint and accepts connections in a loop.
+    /// For each request, routes to the appropriate handler.
+    pub async fn serve(self) -> Result<()> {
+        // Create the network hub
+        let net_hub = fastn_net::Hub::new(self.secret_key.clone()).await?;
+
+        println!("Hub listening on ID52: {}", net_hub.id52());
+        println!("FASTN_HOME: {:?}", self.home);
+
+        // Accept connections in a loop
+        loop {
+            match net_hub.accept::<Request>().await {
+                Ok((peer_key, request, responder)) => {
+                    let peer_id52 = fastn_net::to_id52(&peer_key);
+
+                    // For now, we assume the requester's hub ID is the same as their spoke ID
+                    // In a full implementation, this would be extracted from the request
+                    // or looked up from a registry
+                    let requester_hub_id = peer_id52.clone();
+
+                    match self.handle_request(&peer_id52, &requester_hub_id, request).await {
+                        Ok(response) => {
+                            if let Err(e) = responder.respond::<Response, HubError>(Ok(response)).await {
+                                eprintln!("Failed to send response: {}", e);
+                            }
+                        }
+                        Err(hub_error) => {
+                            if let Err(e) = responder.respond::<Response, HubError>(Err(hub_error)).await {
+                                eprintln!("Failed to send error response: {}", e);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to accept connection: {}", e);
+                }
+            }
+        }
     }
 }
 
@@ -291,38 +417,74 @@ pub enum HubError {
 // proceeding to the next level. If any level DENIES, access is immediately denied.
 // If no WASM module exists at a level, that level is skipped (implicit allow).
 //
+// SPECIAL FILES (prefixed with `_`):
+//   - _access.wasm - General access control
+//   - _read.wasm   - Read access control
+//   - _write.wasm  - Write access control
+//   - _admin.wasm  - Admin access (for modifying ACL files)
+//
+// READ/WRITE vs GET/POST:
+//   - read_file/write_file: Raw byte operations for file content
+//   - get/post: HTTP-like semantics with content-type and WASM execution
+//
+// GET/POST WASM EXECUTION:
+//   Any .wasm file NOT prefixed with `_` can handle get/post requests:
+//   - foo.wasm handles requests to /foo.wasm
+//   - foo.json.wasm handles requests to /foo.json (dynamic handler)
+//   - /foo/ tries foo.wasm first, then foo/index.wasm
+//
+// CONSTRAINTS:
+//   - foo.json and foo.json.wasm cannot both exist (write/rename fails)
+//   - foo.wasm and foo/index.wasm cannot both exist
+//
 // Hierarchy (checked in order, top to bottom):
 //
-// 1. ROOT KOSHA - Global level (root/access.wasm)
-//    └── access.wasm - Global ACL for all requests
+// 1. ROOT KOSHA - Global level (root/_access.wasm)
+//    └── _access.wasm - Global ACL for all requests
 //
 // 2. ROOT KOSHA - App level (root/kosha/...)
-//    ├── access.wasm - All kosha operations
-//    ├── read.wasm   - All kosha read operations
-//    └── write.wasm  - All kosha write operations
+//    ├── _access.wasm - All kosha operations
+//    ├── _read.wasm   - All kosha read operations
+//    └── _write.wasm  - All kosha write operations
 //
 // 3. ROOT KOSHA - Instance level (root/kosha/<name>/...)
-//    ├── access.wasm - This kosha's operations
-//    ├── read.wasm   - This kosha's reads
-//    └── write.wasm  - This kosha's writes
+//    ├── _access.wasm - This kosha's operations
+//    ├── _read.wasm   - This kosha's reads
+//    └── _write.wasm  - This kosha's writes
 //
 // 4. TARGET KOSHA - Folder levels (for file operations with paths)
 //    For path "foo/bar/file.txt", check each level:
-//    ├── /access.wasm, /read.wasm, /write.wasm  (root of target kosha)
-//    ├── /foo/access.wasm, /foo/read.wasm, ...
-//    └── /foo/bar/access.wasm, /foo/bar/read.wasm, ...
+//    ├── /_access.wasm, /_read.wasm, /_write.wasm  (root of target kosha)
+//    ├── /foo/_access.wasm, /foo/_read.wasm, ...
+//    └── /foo/bar/_access.wasm, /foo/bar/_read.wasm, ...
 //
-// At each level, precedence is: read/write.wasm (specific) > access.wasm (general)
+// At each level, precedence is: _read/_write.wasm (specific) > _access.wasm (general)
 //
 // Flow:
 //   - Check level → DENY = stop, ALLOW = continue to next level
 //   - No module at level = implicit ALLOW (continue)
 //   - All levels pass = ALLOW
 //   - Must have at least one module somewhere (otherwise deny)
+//
+// ADMIN ACCESS:
+//   Writes to special files (_access.wasm, _read.wasm, _write.wasm, _admin.wasm)
+//   require admin permission. The system checks _admin.wasm from the target
+//   directory upward to root. If no _admin.wasm is found, only hub owner can modify.
+//
+//   Example: To write foo/bar/_access.wasm:
+//   1. Check foo/bar/_admin.wasm
+//   2. If not found, check foo/_admin.wasm
+//   3. If not found, check _admin.wasm (root)
+//   4. If none found, deny (hub owner only)
+//
 
 /// Access control context passed to WASM modules
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessContext {
+    /// Hub ID of the requesting spoke (each user has their own hub)
+    pub requester_hub_id: String,
+    /// This hub's ID (if requester_hub_id == current_hub_id, it's the owner)
+    pub current_hub_id: String,
     /// The spoke requesting access
     pub spoke_id52: String,
     /// Application type (e.g., "kosha")
@@ -333,6 +495,61 @@ pub struct AccessContext {
     pub command: String,
     /// Path within the kosha (for file operations), None for non-path operations
     pub path: Option<String>,
+}
+
+impl AccessContext {
+    /// Check if the requester is the hub owner (same user)
+    pub fn is_owner(&self) -> bool {
+        self.requester_hub_id == self.current_hub_id
+    }
+}
+
+/// Request context passed to get/post WASM handlers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestContext {
+    /// Hub ID of the requesting spoke
+    pub requester_hub_id: String,
+    /// This hub's ID
+    pub current_hub_id: String,
+    /// The spoke requesting access
+    pub spoke_id52: String,
+    /// HTTP method: "GET" or "POST"
+    pub method: String,
+    /// Request path
+    pub path: String,
+    /// Query string (if any)
+    pub query: Option<String>,
+    /// POST payload (JSON)
+    pub payload: Option<serde_json::Value>,
+}
+
+impl RequestContext {
+    /// Check if the requester is the hub owner (same user)
+    pub fn is_owner(&self) -> bool {
+        self.requester_hub_id == self.current_hub_id
+    }
+}
+
+/// Database access context for _db.wasm ACL
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DbAccessContext {
+    /// Hub ID of the requesting spoke
+    pub requester_hub_id: String,
+    /// This hub's ID
+    pub current_hub_id: String,
+    /// The spoke requesting access
+    pub spoke_id52: String,
+    /// Database name (e.g., "users.db")
+    pub database: String,
+    /// Operation: "query", "execute", "begin", "commit", "rollback"
+    pub operation: String,
+}
+
+impl DbAccessContext {
+    /// Check if the requester is the hub owner (same user)
+    pub fn is_owner(&self) -> bool {
+        self.requester_hub_id == self.current_hub_id
+    }
 }
 
 /// Result of an access check
@@ -351,6 +568,9 @@ impl Hub {
     ///
     /// This implements cascading ACL checks from top to bottom.
     /// Each level must ALLOW before proceeding. Any DENY stops immediately.
+    ///
+    /// For write operations on ACL files (access.wasm, read.wasm, write.wasm, admin.wasm),
+    /// an additional admin check is performed via admin.wasm.
     pub async fn check_access(&self, ctx: &AccessContext) -> AccessResult {
         // Get the root kosha for ACL modules
         let root = match self.koshas.get("root") {
@@ -360,6 +580,26 @@ impl Hub {
                 return AccessResult::Denied("No root kosha configured".to_string());
             }
         };
+
+        // Check if this is a write to a special file - requires admin access
+        let is_special_write = matches!(ctx.command.as_str(), "write_file" | "delete" | "rename")
+            && ctx.path.as_ref().map(|p| Self::is_special_file(p)).unwrap_or(false);
+
+        if is_special_write {
+            if let Some(ref path) = ctx.path {
+                if let Some(target_kosha) = self.koshas.get(&ctx.instance) {
+                    match self.check_admin_access(target_kosha, path, ctx).await {
+                        AccessResult::Allowed => {}
+                        AccessResult::Denied(reason) => return AccessResult::Denied(reason),
+                        AccessResult::NoModule => {
+                            return AccessResult::Denied(
+                                "Admin access required to modify ACL files".to_string()
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         let category = Self::command_category(&ctx.command);
         let mut found_any_module = false;
@@ -436,18 +676,18 @@ impl Hub {
         category: Option<&str>,
         ctx: &AccessContext,
     ) -> LevelResult {
-        // First check category-specific module (read.wasm or write.wasm)
+        // First check category-specific module (_read.wasm or _write.wasm)
         if let Some(cat) = category {
-            let path = format!("{}{}.wasm", prefix, cat);
+            let path = format!("{}_{}.wasm", prefix, cat);
             match self.run_access_wasm(kosha, &path, ctx).await {
                 AccessResult::Allowed => return LevelResult::Allowed,
                 AccessResult::Denied(reason) => return LevelResult::Denied(reason),
-                AccessResult::NoModule => {} // Continue to check access.wasm
+                AccessResult::NoModule => {} // Continue to check _access.wasm
             }
         }
 
-        // Then check general access.wasm
-        let path = format!("{}access.wasm", prefix);
+        // Then check general _access.wasm
+        let path = format!("{}_access.wasm", prefix);
         match self.run_access_wasm(kosha, &path, ctx).await {
             AccessResult::Allowed => LevelResult::Allowed,
             AccessResult::Denied(reason) => LevelResult::Denied(reason),
@@ -523,6 +763,62 @@ impl Hub {
         // The WASM module should export: fn allowed(ctx_json: &str) -> bool
         // We serialize AccessContext to JSON and pass it to the function
         todo!("execute_access_wasm - need WASM runtime integration")
+    }
+
+    /// Check if a path refers to a special WASM file (prefixed with `_`)
+    /// Note: index.wasm is NOT a special file - it's the directory handler
+    fn is_special_file(path: &str) -> bool {
+        let filename = path.rsplit('/').next().unwrap_or(path);
+        matches!(filename, "_access.wasm" | "_read.wasm" | "_write.wasm" | "_admin.wasm")
+    }
+
+    /// Check admin access for modifying ACL files
+    ///
+    /// When writing to ACL files (_access.wasm, _read.wasm, _write.wasm, _admin.wasm),
+    /// we need to check _admin.wasm at the same level or parent levels.
+    ///
+    /// For example, to write `foo/bar/_access.wasm`:
+    /// 1. Check `foo/bar/_admin.wasm`
+    /// 2. If not found, check `foo/_admin.wasm`
+    /// 3. If not found, check `_admin.wasm` (root)
+    /// 4. If no _admin.wasm found anywhere, deny (only hub owner can modify)
+    pub async fn check_admin_access(&self, kosha: &Kosha, path: &str, ctx: &AccessContext) -> AccessResult {
+        // Get the directory containing the ACL file
+        let dir = if let Some(idx) = path.rfind('/') {
+            &path[..idx]
+        } else {
+            ""
+        };
+
+        // Check _admin.wasm from the target directory up to root
+        let mut current_dir = dir.to_string();
+        loop {
+            let admin_path = if current_dir.is_empty() {
+                "_admin.wasm".to_string()
+            } else {
+                format!("{}/_admin.wasm", current_dir)
+            };
+
+            match self.run_access_wasm(kosha, &admin_path, ctx).await {
+                AccessResult::Allowed => return AccessResult::Allowed,
+                AccessResult::Denied(reason) => return AccessResult::Denied(reason),
+                AccessResult::NoModule => {
+                    // No _admin.wasm at this level, try parent
+                    if current_dir.is_empty() {
+                        break;
+                    }
+                    current_dir = if let Some(idx) = current_dir.rfind('/') {
+                        current_dir[..idx].to_string()
+                    } else {
+                        String::new()
+                    };
+                }
+            }
+        }
+
+        // No _admin.wasm found anywhere - deny by default
+        // Only hub owner (checked separately) can modify ACL files
+        AccessResult::Denied("No _admin.wasm found - only hub owner can modify ACL files".to_string())
     }
 }
 
