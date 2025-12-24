@@ -136,31 +136,135 @@ impl Hub {
         })
     }
 
-    /// Accept a request from a spoke or another hub
+    /// Get a stream of incoming connections
     ///
-    /// Returns the peer's public key, the deserialized request, and a responder
-    /// that must be used to send exactly one response.
-    pub async fn accept<Req: DeserializeOwned>(&self) -> Result<(PublicKey, Req, Responder)> {
-        // Accept incoming connection
+    /// Returns an `IncomingConnections` that yields connections as they arrive.
+    /// Each connection should be processed in a spawned task.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let incoming = hub.incoming();
+    /// while let Some(conn) = incoming.next().await {
+    ///     tokio::spawn(async move {
+    ///         if let Ok(active) = conn.accept().await {
+    ///             // handle connection in spawned task
+    ///         }
+    ///     });
+    /// }
+    /// ```
+    pub fn incoming(&self) -> IncomingConnections {
+        IncomingConnections {
+            endpoint: self.endpoint.clone(),
+        }
+    }
+
+    /// Accept an incoming connection (low-level API for concurrent handling)
+    ///
+    /// Returns an `IncomingConnection` that can be processed in a spawned task.
+    /// Use this instead of `accept()` when you need to handle multiple connections
+    /// concurrently - spawn a task immediately after getting the IncomingConnection.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// loop {
+    ///     let incoming = hub.accept_incoming().await?;
+    ///     tokio::spawn(async move {
+    ///         if let Ok(conn) = incoming.accept().await {
+    ///             // handle connection in spawned task
+    ///         }
+    ///     });
+    /// }
+    /// ```
+    pub async fn accept_incoming(&self) -> Result<IncomingConnection> {
         let incoming = self
             .endpoint
             .accept()
             .await
             .ok_or_else(|| Error::AcceptConnection("Endpoint closed".into()))?;
 
-        let conn = incoming
+        Ok(IncomingConnection { incoming })
+    }
+
+    /// Accept a request from a spoke or another hub (simple blocking API)
+    ///
+    /// Note: This blocks while waiting for the connection handshake, stream setup,
+    /// and request data. For concurrent handling, use `accept_incoming()` instead.
+    ///
+    /// Returns the peer's public key, the deserialized request, and a responder
+    /// that must be used to send exactly one response.
+    pub async fn accept<Req: DeserializeOwned>(&self) -> Result<(PublicKey, Req, Responder)> {
+        let incoming = self.accept_incoming().await?;
+        let conn = incoming.accept().await?;
+        conn.accept_request().await
+    }
+}
+
+/// Stream of incoming connections
+///
+/// Use this with a loop to accept connections and spawn tasks to handle them.
+pub struct IncomingConnections {
+    endpoint: iroh::Endpoint,
+}
+
+impl IncomingConnections {
+    /// Wait for and return the next incoming connection
+    ///
+    /// Returns `None` when the endpoint is closed.
+    pub async fn next(&self) -> Option<IncomingConnection> {
+        self.endpoint.accept().await.map(|incoming| IncomingConnection { incoming })
+    }
+}
+
+/// An incoming connection that hasn't completed the handshake yet
+///
+/// This should be processed in a spawned task to allow accepting more connections
+/// while the handshake is in progress.
+pub struct IncomingConnection {
+    incoming: iroh::endpoint::Incoming,
+}
+
+impl IncomingConnection {
+    /// Complete the connection handshake
+    ///
+    /// Returns an `ActiveConnection` that can handle multiple streams.
+    pub async fn accept(self) -> Result<ActiveConnection> {
+        let conn = self.incoming
             .await
             .map_err(|e| Error::AcceptConnection(e.to_string()))?;
 
-        // Get peer's public key
         let remote_node_id = conn
             .remote_node_id()
             .map_err(|e| Error::AcceptConnection(format!("Could not get remote node ID: {}", e)))?;
-        let peer =
-            PublicKey::from_bytes(remote_node_id.as_bytes()).map_err(|e| Error::AcceptConnection(e.to_string()))?;
+        let peer = PublicKey::from_bytes(remote_node_id.as_bytes())
+            .map_err(|e| Error::AcceptConnection(e.to_string()))?;
 
-        // Accept bidirectional stream
-        let (send, mut recv) = conn
+        Ok(ActiveConnection { conn, peer })
+    }
+}
+
+/// An active connection that can handle multiple bidirectional streams
+pub struct ActiveConnection {
+    conn: iroh::endpoint::Connection,
+    peer: PublicKey,
+}
+
+impl ActiveConnection {
+    /// Get the peer's public key
+    pub fn peer(&self) -> &PublicKey {
+        &self.peer
+    }
+
+    /// Get the peer's ID52
+    pub fn peer_id52(&self) -> String {
+        to_id52(&self.peer)
+    }
+
+    /// Accept a single request on this connection
+    ///
+    /// For handling multiple concurrent requests on the same connection,
+    /// use `accept_stream()` in a loop with spawned tasks.
+    pub async fn accept_request<Req: DeserializeOwned>(&self) -> Result<(PublicKey, Req, Responder)> {
+        let (send, mut recv) = self.conn
             .accept_bi()
             .await
             .map_err(|e| Error::AcceptConnection(e.to_string()))?;
@@ -175,7 +279,54 @@ impl Hub {
         let request_json = read_line(&mut recv).await?;
         let request: Req = serde_json::from_str(&request_json)?;
 
-        Ok((peer, request, Responder { send }))
+        Ok((self.peer.clone(), request, Responder { send }))
+    }
+
+    /// Accept a bidirectional stream (lowest-level API)
+    ///
+    /// Returns an `IncomingStream` that can be processed in a spawned task.
+    /// Use this when you need to handle multiple concurrent requests on the same connection.
+    pub async fn accept_stream(&self) -> Result<IncomingStream> {
+        let (send, recv) = self.conn
+            .accept_bi()
+            .await
+            .map_err(|e| Error::AcceptConnection(e.to_string()))?;
+
+        Ok(IncomingStream {
+            send,
+            recv,
+            peer: self.peer.clone(),
+        })
+    }
+}
+
+/// An incoming bidirectional stream
+///
+/// Process this in a spawned task to handle multiple concurrent requests.
+pub struct IncomingStream {
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+    peer: PublicKey,
+}
+
+impl IncomingStream {
+    /// Get the peer's public key
+    pub fn peer(&self) -> &PublicKey {
+        &self.peer
+    }
+
+    /// Process this stream as a request/response
+    pub async fn process<Req: DeserializeOwned>(mut self) -> Result<(PublicKey, Req, Responder)> {
+        // Send ACK
+        self.send.write_all(ACK)
+            .await
+            .map_err(|e| Error::Write(e.to_string()))?;
+
+        // Read request JSON (newline-terminated)
+        let request_json = read_line(&mut self.recv).await?;
+        let request: Req = serde_json::from_str(&request_json)?;
+
+        Ok((self.peer, request, Responder { send: self.send }))
     }
 }
 

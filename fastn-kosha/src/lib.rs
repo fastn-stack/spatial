@@ -179,7 +179,7 @@ impl Kosha {
     /// Create or open a kosha at the given path
     pub async fn open(path: PathBuf, alias: String) -> Result<Self> {
         // Ensure directories exist
-        tokio::fs::create_dir_all(path.join("src")).await?;
+        tokio::fs::create_dir_all(path.join("files")).await?;
         tokio::fs::create_dir_all(path.join("history")).await?;
         tokio::fs::create_dir_all(path.join("kv")).await?;
 
@@ -196,16 +196,61 @@ impl Kosha {
         &self.path
     }
 
-    // File operations - to be implemented
-
-    /// Read a file from src/
-    pub async fn read_file(&self, _path: &str) -> Result<Vec<u8>> {
-        todo!("read_file")
+    /// Get the files directory path
+    fn files_path(&self) -> PathBuf {
+        self.path.join("files")
     }
 
-    /// Write a file to src/, creating history entry
-    pub async fn write_file(&self, _path: &str, _content: &[u8]) -> Result<()> {
-        todo!("write_file")
+    /// Validate and sanitize a file path to prevent directory traversal
+    fn validate_path(&self, path: &str) -> Result<PathBuf> {
+        // Remove leading slashes
+        let clean_path = path.trim_start_matches('/');
+
+        // Check for directory traversal attempts
+        if clean_path.contains("..") {
+            return Err(Error::InvalidPath("Path cannot contain '..'".to_string()));
+        }
+
+        // Build full path
+        let full_path = self.files_path().join(clean_path);
+
+        // Verify the path is within files directory
+        if !full_path.starts_with(&self.files_path()) {
+            return Err(Error::InvalidPath("Path escapes kosha directory".to_string()));
+        }
+
+        Ok(full_path)
+    }
+
+    // File operations
+
+    /// Read a file from files/
+    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>> {
+        let full_path = self.validate_path(path)?;
+
+        if !full_path.exists() {
+            return Err(Error::NotFound(path.to_string()));
+        }
+
+        tokio::fs::read(&full_path)
+            .await
+            .map_err(|e| Error::Io(e))
+    }
+
+    /// Write a file to files/, creating history entry
+    /// For now, history is not implemented - just writes the file
+    pub async fn write_file(&self, path: &str, content: &[u8]) -> Result<()> {
+        let full_path = self.validate_path(path)?;
+
+        // Create parent directories if needed
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        // TODO: Create history entry before overwriting
+
+        tokio::fs::write(&full_path, content).await?;
+        Ok(())
     }
 
     /// List directory contents

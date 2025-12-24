@@ -15,7 +15,7 @@ Each kosha is stored on disk with the following layout:
 
 ```
 <kosha-path>/
-├── src/              # Current versions of all files
+├── files/            # Current versions of all files
 │   ├── foo.txt
 │   └── bar/
 │       └── baz.json
@@ -34,7 +34,7 @@ History files use a flat naming scheme:
 - Timestamp is appended after `__` separator
 - Format: `<flattened-path>__<ISO8601-timestamp>`
 
-Example: `src/foo/bar.txt` at 2024-12-24 15:30:45 UTC becomes:
+Example: `files/foo/bar.txt` at 2024-12-24 15:30:45 UTC becomes:
 `history/foo~bar.txt__20241224T153045Z`
 
 ## File Operations
@@ -93,7 +93,7 @@ kosha.rename("old/path.txt", "new/path.txt").await?
 ### Delete File
 ```rust
 kosha.delete("path/to/file.txt").await?
-// Creates final history entry, then removes from src/
+// Creates final history entry, then removes from files/
 ```
 
 ## Key-Value Operations
@@ -324,6 +324,39 @@ Access control is managed via special WASM modules (prefixed with `_`) stored in
 
 Note: `index.wasm` is NOT a special file - it's a regular executable used for directory handling.
 
+### Hub Authorization Files (`.hubs`)
+
+Each ACL WASM module can have a corresponding `.hubs` file that lists authorized hubs:
+- `_access.hubs` - lists hubs that can pass `_access.wasm` ACL
+- `_read.hubs` - lists hubs for `_read.wasm` checks
+- `_write.hubs` - lists hubs for `_write.wasm` checks
+- `_db.hubs` - lists hubs for `_db.wasm` database access
+- `_admin.hubs` - lists hubs for `_admin.wasm` admin access
+
+The `.hubs` file provides a declarative list that the WASM module can query. This enables simple ACL patterns without hardcoding hub IDs in WASM:
+
+```rust
+// In _access.wasm
+fn allowed(ctx: &AccessContext) -> bool {
+    // Check if requester is in the _access.hubs file
+    ctx.is_hub_authorized("_access.hubs")
+}
+```
+
+**File format** (same as hub authorization files):
+```
+# Authorized hubs
+ABCD...XYZ: alice       # Direct hub entry
+EFGH...ABC: bob  # inline comment
+@friends                # Include from friends.hubs
+@ROOT/trusted           # Include from root kosha's hubs/trusted.hubs
+#alice                  # Reference single hub by alias
+```
+
+**Uniqueness constraints:**
+- Each ID52 must be defined in exactly **one** `.hubs` file
+- Each alias must be **globally unique** across all files
+
 ### Unified Namespace
 
 Files and KV keys share the same namespace and are subject to the same ACL rules:
@@ -344,7 +377,7 @@ ACL WASM files (`_access.wasm`, `_read.wasm`, `_write.wasm`) are protected by `_
 
 ```
 mykosha/
-├── src/
+├── files/
 │   ├── _admin.wasm          # Controls who can modify ACL at root and below
 │   ├── _access.wasm         # Protected by _admin.wasm
 │   └── private/
@@ -368,11 +401,13 @@ mykosha/
 
 ```
 mykosha/
-├── src/
-│   ├── _access.wasm         # Root ACL
+├── files/
+│   ├── _access.wasm         # Root ACL (WASM module)
+│   ├── _access.hubs         # Hubs authorized for root access
 │   ├── api.wasm             # Handles GET/POST /api/ (alternative to api/index.wasm)
 │   ├── api/
 │   │   ├── _read.wasm       # Read ACL for api/*
+│   │   ├── _read.hubs       # Hubs authorized to read api/*
 │   │   ├── users.wasm       # Handles GET/POST /api/users/
 │   │   ├── config.json      # Static file: GET returns with content-type: application/json
 │   │   └── data/
@@ -380,9 +415,11 @@ mykosha/
 │   │       └── stats.json.wasm  # Handles GET/POST /api/data/stats.json (dynamic)
 │   └── private/
 │       ├── _access.wasm     # Controls all access to private/*
+│       ├── _access.hubs     # Hubs authorized for private/*
 │       ├── secrets.txt      # Static file
 │       └── config/
-│           └── _write.wasm  # Additional write restrictions for config/*
+│           ├── _write.wasm  # Additional write restrictions for config/*
+│           └── _write.hubs  # Hubs authorized to write to config/*
 └── kv/
     └── store.dson           # Keys like "private/counter" also checked by private/_access.wasm
 ```
@@ -399,13 +436,15 @@ Any file with `.sqlite3` extension in the kosha is treated as a SQLite database.
 
 ```
 <kosha-path>/
-├── src/
+├── files/
 │   ├── users.sqlite3           # Database in root
 │   ├── api/
 │   │   ├── _db.wasm            # ACL for databases in api/ (optional)
+│   │   ├── _db.hubs            # Hubs authorized for database access in api/
 │   │   └── analytics.sqlite3   # Database in api/
 │   └── private/
 │       ├── _db.wasm            # ACL for databases in private/
+│       ├── _db.hubs            # Hubs authorized for database access in private/
 │       └── data.sqlite3        # Database in private/
 ├── history/
 └── kv/

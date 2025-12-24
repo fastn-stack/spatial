@@ -7,8 +7,8 @@ Hub server for the fastn P2P network. Manages koshas (versioned storage) and aut
 A **Hub** is a P2P server that:
 - Listens for connections from authenticated spokes
 - Manages one or more koshas (storage units)
-- Can connect to other hubs for federation
-- Exposes APIs for file and key-value operations
+- Authorizes spokes before allowing connections
+- Routes requests to the appropriate application handler
 
 ## FASTN_HOME Directory
 
@@ -20,14 +20,21 @@ The hub stores its configuration and data in `FASTN_HOME`:
 $FASTN_HOME/
 ├── hub.key           # Hub's secret key (Ed25519)
 ├── config.json       # Hub configuration
-├── spokes.json       # Authorized spoke public keys
 └── koshas/           # Kosha storage
-    ├── my-kosha/
-    │   ├── src/
+    ├── root/         # Root kosha (system config)
+    │   ├── files/
+    │   │   ├── spokes.txt       # Authorized spokes (id52: alias)
+    │   │   └── hubs/            # Hub authorization lists
+    │   │       ├── README.txt   # Format documentation
+    │   │       ├── friends.txt  # Example: friend hubs
+    │   │       └── trusted.txt  # Example: combined list
     │   ├── history/
     │   └── kv/
-    └── another-kosha/
-        └── ...
+    └── my-kosha/     # User koshas
+        ├── files/
+        │   └── _hubs/           # Per-kosha hub authorization
+        ├── history/
+        └── kv/
 ```
 
 ## CLI Commands
@@ -42,13 +49,15 @@ Creates `hub.key` and initial config. Prints the hub's ID52.
 ```bash
 fastn-hub info
 ```
-Displays hub ID52 and configuration.
+Displays hub ID52 and spoke count.
 
 ### Add Spoke
 ```bash
 fastn-hub add-spoke <spoke-id52>
 ```
-Authorizes a spoke to connect to this hub.
+Authorizes a spoke to connect to this hub. The alias defaults to the first
+8 characters of the ID52. To change aliases, edit spokes.txt directly in
+the root kosha.
 
 ### Remove Spoke
 ```bash
@@ -60,23 +69,11 @@ Revokes spoke authorization.
 ```bash
 fastn-hub list-spokes
 ```
-Shows all authorized spokes.
-
-### Create Kosha
-```bash
-fastn-hub kosha-create <alias>
-```
-Creates a new kosha with the given alias.
-
-### List Koshas
-```bash
-fastn-hub kosha-list
-```
-Lists all koshas on this hub.
+Shows all authorized spokes with their aliases.
 
 ### Run Hub Server
 ```bash
-fastn-hub serve
+fastn-hub
 ```
 Starts the hub server, listening for spoke connections.
 
@@ -84,25 +81,126 @@ Starts the hub server, listening for spoke connections.
 
 ```json
 {
-  "hub_id52": "...",
-  "created_at": "2024-12-24T15:30:45Z",
-  "koshas": ["my-kosha", "another-kosha"]
+  "hub_id52": "ABCD...XYZ",
+  "created_at": "2024-12-24T15:30:45Z"
 }
 ```
 
-## Spokes Configuration (spokes.json)
+## Spokes Configuration (spokes.txt)
 
-```json
-{
-  "authorized": [
-    {
-      "id52": "...",
-      "name": "Alice's Laptop",
-      "added_at": "2024-12-24T15:30:45Z"
-    }
-  ]
-}
+Stored in the root kosha at `FASTN_HOME/koshas/root/files/spokes.txt`.
+Simple text file with one spoke per line:
 ```
+# Authorized spokes (one per line)
+# Format: <id52>: <alias>
+ABCD1234...XYZ: my-laptop
+EFGH5678...ABC: work-machine
+```
+
+The alias is provided by the spoke when it connects for the first time.
+Spokes must run `fastn-spoke init <hub-id52> <alias>` to set their alias.
+When you run `fastn-hub add-spoke <id52>`, the hub uses the alias from
+the pending connection.
+
+### Pending Spokes
+
+When an unauthorized spoke connects, the hub records it as "pending".
+To see pending spokes:
+```bash
+fastn-hub list-pending
+```
+
+This shows spoke IDs with their requested aliases, which you can then
+authorize with `fastn-hub add-spoke <id52>`.
+
+## Hub Authorization (hubs/ folder)
+
+For hub-to-hub communication, authorization lists are stored in the
+`hubs/` folder within the root kosha (`FASTN_HOME/koshas/root/files/hubs/`).
+
+Each `.hubs` file can contain:
+- `<id52>: <alias>` - authorize a hub with given alias
+- `<id52>: <alias> # comment` - inline comments (` # ` required)
+- `# comment` - full-line comments (space after `#` required)
+- `@<filename>` - include all hubs from `<filename>.hubs`
+- `@ROOT/<name>` - include from root kosha's `hubs/<name>.hubs`
+- `#<alias>` - reference a single hub by its alias (no space after `#`)
+
+### Uniqueness Constraints
+
+**IMPORTANT:**
+- Each ID52 must be defined in exactly **one** `.hubs` file
+- Each alias must be **globally unique** across all files
+- Duplicates will cause errors during resolution
+
+### Example: Hub Authorization Files
+
+```
+hubs/
+├── README.txt       # Auto-generated with format documentation
+├── friends.hubs     # Personal friends
+├── family.hubs      # Family members
+└── trusted.hubs     # Combined list
+```
+
+**friends.hubs:**
+```
+# Close friends with their own hubs
+ABCD...XYZ: alice  # my friend Alice
+EFGH...ABC: bob
+```
+
+**family.hubs:**
+```
+IJKL...DEF: mom
+MNOP...GHI: dad
+```
+
+**trusted.hubs:**
+```
+# Include everyone from friends and family
+# They all get the alias "trusted" when accessed through this file
+@friends
+@family
+#alice   # just Alice (reference by her alias)
+```
+
+### Include Semantics
+
+When you include via `@filename`, all included hubs get the **includer's
+filename** as their alias (not their original alias). This is useful for
+grouping - e.g., including friends in a "trusted" file gives them the
+"trusted" alias.
+
+When you reference a single hub via `#alias`, only that specific hub is
+included, using the alias you gave it when defining it.
+
+### Non-Root Kosha Authorization (_hubs/)
+
+In non-root koshas, hub authorization lists are stored in `_hubs/`:
+```
+my-kosha/
+├── files/
+│   ├── _hubs/              # Hub authorization for this kosha
+│   │   └── allowed.hubs    # Who can access this kosha
+│   └── data/
+└── ...
+```
+
+You can reference root kosha files with `@ROOT/<name>`:
+```
+# allowed.hubs in a non-root kosha
+@ROOT/trusted    # Include all from root's hubs/trusted.hubs
+```
+
+### ACL Integration with WASM
+
+Hub authorization files can be paired with WASM access control modules:
+- `_access.hubs` - lists hubs that can pass `_access.wasm` ACL
+- `_read.hubs` - lists hubs for `_read.wasm` features
+- `_write.hubs` - lists hubs for `_write.wasm` features
+
+The naming convention is `_<name>.hubs` corresponds to `_<name>.wasm`.
 
 ## API Protocol
 

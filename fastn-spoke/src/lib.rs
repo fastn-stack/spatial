@@ -22,7 +22,7 @@ pub enum Error {
     #[error("Network error: {0}")]
     Net(#[from] fastn_net::Error),
 
-    #[error("Spoke not initialized. Run 'fastn-spoke init' first.")]
+    #[error("Spoke not initialized. Run 'fastn-spoke init <hub-id52>' first.")]
     NotInitialized,
 
     #[error("Hub not found: {0}")]
@@ -31,11 +31,17 @@ pub enum Error {
     #[error("Connection failed: {0}")]
     ConnectionFailed(String),
 
+    #[error("Hub rejected connection (not authorized). Ask hub admin to run: fastn-hub add-spoke {0}")]
+    NotAuthorized(String),
+
     #[error("Hub error: {0}")]
     Hub(String),
 
     #[error("Invalid ID52: {0}")]
     InvalidId52(String),
+
+    #[error("Spoke already initialized at {0:?}")]
+    AlreadyInitialized(PathBuf),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -43,7 +49,13 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Spoke configuration stored in config.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpokeConfig {
+    /// The spoke's ID52
     pub spoke_id52: String,
+    /// The hub's ID52 this spoke connects to
+    pub hub_id52: String,
+    /// Human-readable name/alias for this spoke
+    pub alias: String,
+    /// When the spoke was created
     pub created_at: DateTime<Utc>,
 }
 
@@ -69,7 +81,8 @@ pub struct Spoke {
     secret_key: SecretKey,
     /// Configuration
     config: SpokeConfig,
-    /// Known hubs
+    /// Known hubs (for future multi-hub support)
+    #[allow(dead_code)]
     hubs: HubsConfig,
 }
 
@@ -104,24 +117,125 @@ impl Spoke {
         &self.home
     }
 
-    // Stub implementations - to be filled in
+    /// Get the hub's ID52 this spoke is configured to connect to
+    pub fn hub_id52(&self) -> &str {
+        &self.config.hub_id52
+    }
 
-    /// Initialize a new spoke
-    pub async fn init() -> Result<Self> {
-        todo!("Spoke::init")
+    /// Get the spoke's alias
+    pub fn alias(&self) -> &str {
+        &self.config.alias
+    }
+
+    /// Get the secret key
+    pub fn secret_key(&self) -> &SecretKey {
+        &self.secret_key
+    }
+
+    /// Initialize a new spoke with a hub ID52 and alias
+    ///
+    /// Creates SPOKE_HOME directory, generates a new secret key,
+    /// and saves the configuration with the hub ID52 and alias.
+    pub async fn init(hub_id52: &str, alias: &str) -> Result<Self> {
+        let home = Self::home_dir();
+
+        // Check if already initialized
+        if Self::is_initialized() {
+            return Err(Error::AlreadyInitialized(home));
+        }
+
+        // Validate hub ID52 format
+        fastn_net::from_id52(hub_id52)
+            .map_err(|_| Error::InvalidId52(hub_id52.to_string()))?;
+
+        // Create home directory
+        tokio::fs::create_dir_all(&home).await?;
+
+        // Generate new secret key
+        let secret_key = SecretKey::generate(&mut rand::thread_rng());
+        let public_key = secret_key.public();
+        let spoke_id52 = fastn_net::to_id52(&public_key);
+
+        // Save secret key
+        let key_path = home.join("spoke.key");
+        let key_bytes = secret_key.to_bytes();
+        tokio::fs::write(&key_path, key_bytes).await?;
+
+        // Create and save config
+        let config = SpokeConfig {
+            spoke_id52,
+            hub_id52: hub_id52.to_string(),
+            alias: alias.to_string(),
+            created_at: Utc::now(),
+        };
+        let config_path = home.join("config.json");
+        let config_json = serde_json::to_string_pretty(&config)?;
+        tokio::fs::write(&config_path, config_json).await?;
+
+        // Create empty hubs config
+        let hubs = HubsConfig::default();
+        let hubs_path = home.join("hubs.json");
+        let hubs_json = serde_json::to_string_pretty(&hubs)?;
+        tokio::fs::write(&hubs_path, hubs_json).await?;
+
+        Ok(Self {
+            home,
+            secret_key,
+            config,
+            hubs,
+        })
     }
 
     /// Load an existing spoke
+    ///
+    /// Loads the secret key and configuration from SPOKE_HOME.
     pub async fn load() -> Result<Self> {
-        todo!("Spoke::load")
+        let home = Self::home_dir();
+
+        // Check if initialized
+        if !Self::is_initialized() {
+            return Err(Error::NotInitialized);
+        }
+
+        // Load secret key
+        let key_path = home.join("spoke.key");
+        let key_bytes = tokio::fs::read(&key_path).await?;
+        let key_array: [u8; 32] = key_bytes
+            .try_into()
+            .map_err(|_| Error::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid key file: expected 32 bytes",
+            )))?;
+        let secret_key = SecretKey::from_bytes(&key_array);
+
+        // Load config
+        let config_path = home.join("config.json");
+        let config_json = tokio::fs::read_to_string(&config_path).await?;
+        let config: SpokeConfig = serde_json::from_str(&config_json)?;
+
+        // Load hubs config (or create default if missing)
+        let hubs_path = home.join("hubs.json");
+        let hubs = if hubs_path.exists() {
+            let hubs_json = tokio::fs::read_to_string(&hubs_path).await?;
+            serde_json::from_str(&hubs_json)?
+        } else {
+            HubsConfig::default()
+        };
+
+        Ok(Self {
+            home,
+            secret_key,
+            config,
+            hubs,
+        })
     }
 
     /// Load or initialize spoke
-    pub async fn load_or_init() -> Result<Self> {
+    pub async fn load_or_init(hub_id52: &str, alias: &str) -> Result<Self> {
         if Self::is_initialized() {
             Self::load().await
         } else {
-            Self::init().await
+            Self::init(hub_id52, alias).await
         }
     }
 
@@ -147,9 +261,30 @@ impl Spoke {
         })
     }
 
-    /// Connect to a hub
-    pub async fn connect(&self, _hub_id52: &str) -> Result<HubConnection> {
-        todo!("Spoke::connect")
+    /// Connect to the configured hub
+    pub async fn connect(&self) -> Result<HubConnection> {
+        let spoke = fastn_net::Spoke::new(self.secret_key.clone(), &self.config.hub_id52).await?;
+        Ok(HubConnection {
+            hub_id52: self.config.hub_id52.clone(),
+            alias: self.config.alias.clone(),
+            spoke,
+        })
+    }
+
+    /// Try to connect to the hub, retrying until successful
+    ///
+    /// This will keep trying to connect every `retry_interval` until the hub accepts.
+    /// Returns once connected successfully.
+    pub async fn connect_with_retry(&self, retry_interval: std::time::Duration) -> Result<HubConnection> {
+        loop {
+            match self.connect().await {
+                Ok(conn) => return Ok(conn),
+                Err(e) => {
+                    eprintln!("Connection failed: {}. Retrying in {:?}...", e, retry_interval);
+                    tokio::time::sleep(retry_interval).await;
+                }
+            }
+        }
     }
 }
 
@@ -157,6 +292,8 @@ impl Spoke {
 pub struct HubConnection {
     /// The hub's ID52
     hub_id52: String,
+    /// The spoke's alias (sent with requests)
+    alias: String,
     /// The underlying spoke connection
     spoke: fastn_net::Spoke,
 }
@@ -171,12 +308,37 @@ impl HubConnection {
     /// Returns the response payload as JSON
     pub async fn send_request(
         &self,
-        _app: &str,
-        _instance: &str,
-        _command: &str,
-        _payload: serde_json::Value,
+        app: &str,
+        instance: &str,
+        command: &str,
+        payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        todo!("HubConnection::send_request")
+        // Build the hub request with alias
+        let request = fastn_hub::Request {
+            alias: Some(self.alias.clone()),
+            app: app.to_string(),
+            instance: instance.to_string(),
+            command: command.to_string(),
+            payload,
+        };
+
+        // Call the hub
+        let result: std::result::Result<fastn_hub::Response, fastn_hub::HubError> =
+            self.spoke.call(request).await?;
+
+        match result {
+            Ok(response) => Ok(response.payload),
+            Err(hub_error) => Err(Error::Hub(format!("{:?}", hub_error))),
+        }
+    }
+
+    /// Send a ping request to verify connectivity
+    /// Returns Ok if hub accepts the connection
+    pub async fn ping(&self) -> Result<()> {
+        // For now, we'll just try to connect - the fastn_net::Spoke::new already establishes connection
+        // A proper ping would send a special ping message
+        // TODO: implement proper ping/heartbeat protocol
+        Ok(())
     }
 
     // Kosha file operations (convenience wrappers around send_request)

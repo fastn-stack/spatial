@@ -5,10 +5,25 @@ Spoke client for the fastn P2P network. Connects to hubs and accesses koshas.
 ## Overview
 
 A **Spoke** is a P2P client that:
-- Connects to one or more authorized hubs
+- Connects to an authorized hub
+- Sends a human-readable alias on connection for identification
 - Reads and writes files through koshas
 - Accesses key-value stores
-- Maintains local cache of frequently accessed data (future)
+- Retries connection until hub accepts
+
+## Quick Start
+
+```bash
+# 1. Get the hub's ID52 from the hub admin
+# 2. Initialize your spoke with the hub ID and an alias
+fastn-spoke init <hub-id52> my-laptop
+
+# 3. Share your spoke ID52 with the hub admin
+# 4. Hub admin runs: fastn-hub add-spoke <your-id52> [alias]
+
+# 5. Connect to the hub (will retry until accepted)
+fastn-spoke
+```
 
 ## SPOKE_HOME Directory
 
@@ -19,92 +34,47 @@ The spoke stores its identity and configuration in `SPOKE_HOME`:
 ```
 $SPOKE_HOME/
 ├── spoke.key         # Spoke's secret key (Ed25519)
-├── config.json       # Spoke configuration
-└── hubs.json         # Known hubs and their aliases
+├── config.json       # Spoke configuration (includes hub_id52 and alias)
+└── hubs.json         # Known hubs (for future multi-hub support)
 ```
 
 ## CLI Commands
 
 ### Initialize Spoke
 ```bash
-fastn-spoke init
+fastn-spoke init <hub-id52> <alias>
 ```
-Creates `spoke.key` and initial config. Prints the spoke's ID52 (to share with hub admins).
+Creates `spoke.key` and config. The alias is a human-readable name for this
+spoke (e.g., 'laptop', 'phone', 'work-pc'). Prints the spoke's ID52 to share
+with the hub admin.
 
 ### Show Spoke Info
 ```bash
 fastn-spoke info
 ```
-Displays spoke ID52 and configuration.
+Displays spoke ID52, alias, and hub ID52.
 
-### Add Hub
+### Run Spoke
 ```bash
-fastn-spoke add-hub <hub-id52> [--alias <name>]
+fastn-spoke
 ```
-Adds a hub to the known hubs list.
+Connects to the configured hub. Will retry every 5 seconds until the hub
+accepts the connection.
 
-### Remove Hub
+### Show Spoke ID
 ```bash
-fastn-spoke remove-hub <hub-id52-or-alias>
+fastn-spoke id
 ```
-Removes a hub from the known hubs list.
-
-### List Hubs
-```bash
-fastn-spoke list-hubs
-```
-Shows all known hubs.
-
-### File Operations
-```bash
-# List files in a kosha
-fastn-spoke ls <hub>/<kosha>/<path>
-
-# Read a file
-fastn-spoke cat <hub>/<kosha>/<path>
-
-# Write a file
-fastn-spoke write <hub>/<kosha>/<path> < input.txt
-
-# Get file versions
-fastn-spoke versions <hub>/<kosha>/<path>
-
-# Read specific version
-fastn-spoke cat <hub>/<kosha>/<path> --version <timestamp>
-```
-
-### KV Operations
-```bash
-# Get a value
-fastn-spoke kv-get <hub>/<kosha>/<key>
-
-# Set a value
-fastn-spoke kv-set <hub>/<kosha>/<key> '{"json": "value"}'
-
-# Delete a key
-fastn-spoke kv-delete <hub>/<kosha>/<key>
-```
+Prints just the spoke's ID52 (useful for scripting).
 
 ## Configuration (config.json)
 
 ```json
 {
-  "spoke_id52": "...",
+  "spoke_id52": "ABCD...XYZ",
+  "hub_id52": "EFGH...ABC",
+  "alias": "my-laptop",
   "created_at": "2024-12-24T15:30:45Z"
-}
-```
-
-## Hubs Configuration (hubs.json)
-
-```json
-{
-  "hubs": [
-    {
-      "id52": "...",
-      "alias": "work-hub",
-      "added_at": "2024-12-24T15:30:45Z"
-    }
-  ]
 }
 ```
 
@@ -114,29 +84,24 @@ fastn-spoke kv-delete <hub>/<kosha>/<key>
 use fastn_spoke::Spoke;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    // Load or create spoke
-    let spoke = Spoke::load_or_init().await?;
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load existing spoke
+    let spoke = Spoke::load().await?;
     println!("Spoke ID: {}", spoke.id52());
+    println!("Alias: {}", spoke.alias());
 
-    // Connect to a hub
-    let hub = spoke.connect("HUB_ID52_HERE").await?;
+    // Connect to the configured hub
+    let conn = spoke.connect().await?;
 
-    // List koshas on the hub
-    let koshas = hub.list_koshas().await?;
-
-    // Read a file
-    let content = hub.read_file("my-kosha", "path/to/file.txt").await?;
+    // Read a file from a kosha
+    let content = conn.read_file("my-kosha", "path/to/file.txt").await?;
 
     // Write a file
-    hub.write_file("my-kosha", "path/to/file.txt", b"content").await?;
-
-    // Get file versions
-    let versions = hub.get_versions("my-kosha", "path/to/file.txt").await?;
+    conn.write_file("my-kosha", "path/to/file.txt", "base64content", None).await?;
 
     // KV operations
-    hub.kv_set("my-kosha", "my-key", json!({"foo": "bar"})).await?;
-    let value = hub.kv_get("my-kosha", "my-key").await?;
+    conn.kv_set("my-kosha", "my-key", serde_json::json!({"foo": "bar"})).await?;
+    let value = conn.kv_get("my-kosha", "my-key").await?;
 
     Ok(())
 }
@@ -144,41 +109,19 @@ async fn main() -> Result<()> {
 
 ## Authentication Flow
 
-1. Spoke initializes and generates Ed25519 keypair
+1. Spoke initializes with hub ID52 and a human-readable alias
 2. Spoke shares its ID52 with hub administrator
-3. Hub admin runs `fastn-hub add-spoke <spoke-id52>`
-4. Spoke can now connect and make requests
+3. Hub admin runs `fastn-hub add-spoke <spoke-id52> [alias]`
+4. Spoke connects and can now make requests
 
-## Connection to Hub
+## Connection Behavior
 
-When connecting to a hub:
-1. Spoke uses fastn-net to establish encrypted connection
-2. Hub receives spoke's public key from the connection
-3. Hub verifies spoke is authorized
-4. If authorized, hub processes requests
+When running `fastn-spoke`:
+1. Spoke attempts to connect to the configured hub
+2. If hub rejects (spoke not authorized), retry every 5 seconds
+3. Once accepted, spoke prints "ONLINE - Connected to hub!"
+4. Maintains connection and can send requests
 
-## Error Handling
+## Environment Variables
 
-```rust
-enum SpokeError {
-    NotInitialized,
-    HubNotFound(String),
-    ConnectionFailed(String),
-    Unauthorized,
-    KoshaNotFound(String),
-    FileNotFound(String),
-    IoError(String),
-}
-```
-
-## Path Syntax
-
-The spoke CLI uses a unified path syntax:
-```
-<hub-alias>/<kosha-alias>/<file-path>
-```
-
-Examples:
-- `work-hub/documents/report.txt`
-- `home/photos/2024/vacation.jpg`
-- `backup/config/settings.json`
+- `SPOKE_HOME` - Override the default spoke data directory

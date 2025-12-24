@@ -62,6 +62,373 @@ pub struct HubConfig {
     pub created_at: DateTime<Utc>,
 }
 
+/// An authorized spoke entry (parsed from spokes.txt)
+#[derive(Debug, Clone)]
+pub struct AuthorizedSpoke {
+    pub id52: String,
+    pub alias: String,
+}
+
+/// Spokes configuration (parsed from spokes.txt)
+/// Format: one line per spoke: `<id52>: <alias>`
+#[derive(Debug, Clone, Default)]
+pub struct SpokesConfig {
+    pub spokes: Vec<AuthorizedSpoke>,
+}
+
+impl SpokesConfig {
+    /// Parse spokes.txt content into SpokesConfig
+    pub fn parse(content: &str) -> Self {
+        let spokes = content
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    return None;
+                }
+                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    Some(AuthorizedSpoke {
+                        id52: parts[0].trim().to_string(),
+                        alias: parts[1].trim().to_string(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        SpokesConfig { spokes }
+    }
+
+    /// Serialize SpokesConfig to spokes.txt format
+    pub fn to_string(&self) -> String {
+        self.spokes
+            .iter()
+            .map(|s| format!("{}: {}", s.id52, s.alias))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Find a spoke by ID52
+    pub fn find_by_id52(&self, id52: &str) -> Option<&AuthorizedSpoke> {
+        self.spokes.iter().find(|s| s.id52 == id52)
+    }
+
+    /// Check if a spoke is authorized
+    pub fn is_authorized(&self, id52: &str) -> bool {
+        self.find_by_id52(id52).is_some()
+    }
+
+    /// Add a spoke (replaces if exists)
+    pub fn add(&mut self, id52: &str, alias: &str) {
+        // Remove existing if present
+        self.spokes.retain(|s| s.id52 != id52);
+        self.spokes.push(AuthorizedSpoke {
+            id52: id52.to_string(),
+            alias: alias.to_string(),
+        });
+    }
+
+    /// Remove a spoke by ID52
+    pub fn remove(&mut self, id52: &str) -> bool {
+        let len_before = self.spokes.len();
+        self.spokes.retain(|s| s.id52 != id52);
+        self.spokes.len() < len_before
+    }
+}
+
+// ============================================================================
+// Hub Authorization - File-based ACL with @include support
+// ============================================================================
+//
+// Hub authorization files are stored in:
+// - Root kosha: hubs/<name>.txt
+// - Other koshas: _hubs/<name>.txt
+//
+// File format (same as spokes.txt):
+//   <id52>: <alias>     - authorize a hub with given alias
+//   # comment           - comments are ignored
+//   @<filename>         - include all hubs from another file
+//   @ROOT/<alias>       - include from root kosha's hubs/<alias>.txt
+//
+// When including via @<filename>, included hubs get the includer's
+// filename as their alias (for grouping purposes).
+//
+// Example: trusted.txt contains "@friends" - all hubs in friends.txt
+// get alias "trusted" when resolved through trusted.txt.
+//
+
+/// An entry in a hub authorization file
+#[derive(Debug, Clone)]
+pub enum HubAuthEntry {
+    /// Direct hub authorization: <id52>: <alias>
+    Hub { id52: String, alias: String },
+    /// Include another file: @<filename> (relative to current kosha)
+    Include(String),
+    /// Include from root kosha: @ROOT/<alias>
+    IncludeRoot(String),
+    /// Reference a single hub by alias: #<alias>
+    AliasRef(String),
+}
+
+/// Parsed hub authorization file
+#[derive(Debug, Clone, Default)]
+pub struct HubAuthFile {
+    /// The entries in this file
+    pub entries: Vec<HubAuthEntry>,
+}
+
+impl HubAuthFile {
+    /// Parse a hub authorization file content
+    pub fn parse(content: &str) -> Self {
+        let entries = content
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+
+                // Strip inline comments (` # ...` - space before # is required)
+                let line = if let Some(idx) = line.find(" # ") {
+                    line[..idx].trim()
+                } else if line.ends_with(" #") {
+                    line[..line.len() - 2].trim()
+                } else {
+                    line
+                };
+
+                // Skip empty lines and full-line comments (# at start with space or alone)
+                if line.is_empty() || line == "#" || line.starts_with("# ") {
+                    return None;
+                }
+
+                // Check for #<alias> reference (single hub by alias, no space after #)
+                if let Some(alias) = line.strip_prefix('#') {
+                    let alias = alias.trim();
+                    if !alias.is_empty() {
+                        return Some(HubAuthEntry::AliasRef(alias.to_string()));
+                    }
+                    return None;
+                }
+
+                // Check for @include directives
+                if let Some(include) = line.strip_prefix('@') {
+                    if let Some(root_path) = include.strip_prefix("ROOT/") {
+                        return Some(HubAuthEntry::IncludeRoot(root_path.to_string()));
+                    }
+                    return Some(HubAuthEntry::Include(include.to_string()));
+                }
+
+                // Parse id52: alias format
+                let parts: Vec<&str> = line.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    Some(HubAuthEntry::Hub {
+                        id52: parts[0].trim().to_string(),
+                        alias: parts[1].trim().to_string(),
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+        HubAuthFile { entries }
+    }
+
+    /// Serialize to file format
+    pub fn to_string(&self) -> String {
+        self.entries
+            .iter()
+            .map(|e| match e {
+                HubAuthEntry::Hub { id52, alias } => format!("{}: {}", id52, alias),
+                HubAuthEntry::Include(name) => format!("@{}", name),
+                HubAuthEntry::IncludeRoot(name) => format!("@ROOT/{}", name),
+                HubAuthEntry::AliasRef(alias) => format!("#{}", alias),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+/// A resolved hub authorization entry (after processing @includes)
+#[derive(Debug, Clone)]
+pub struct ResolvedHubAuth {
+    /// The hub's ID52
+    pub id52: String,
+    /// The alias to use for this hub
+    pub alias: String,
+    /// The file path where this hub was defined (for debugging)
+    pub source_file: String,
+}
+
+/// Hub authorization resolver - resolves @includes recursively
+pub struct HubAuthResolver<'a> {
+    /// The root kosha for @ROOT includes
+    root_kosha: &'a Kosha,
+    /// The current kosha (for relative includes)
+    current_kosha: Option<&'a Kosha>,
+    /// Whether we're resolving from root kosha
+    is_root: bool,
+}
+
+impl<'a> HubAuthResolver<'a> {
+    /// Create a resolver for root kosha
+    pub fn for_root(root_kosha: &'a Kosha) -> Self {
+        Self {
+            root_kosha,
+            current_kosha: None,
+            is_root: true,
+        }
+    }
+
+    /// Create a resolver for a non-root kosha
+    pub fn for_kosha(root_kosha: &'a Kosha, current_kosha: &'a Kosha) -> Self {
+        Self {
+            root_kosha,
+            current_kosha: Some(current_kosha),
+            is_root: false,
+        }
+    }
+
+    /// Resolve a hub authorization file, returning all authorized hubs
+    ///
+    /// The `file_path` is relative to the hubs/ or _hubs/ folder.
+    /// The `override_alias` is used when this file is included via @include.
+    pub fn resolve<'b>(
+        &'b self,
+        file_path: &'b str,
+        override_alias: Option<&'b str>,
+        visited: &'b mut std::collections::HashSet<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<ResolvedHubAuth>>> + Send + 'b>> {
+        Box::pin(async move {
+            // Prevent infinite loops
+            let full_path = if self.is_root {
+                format!("ROOT/hubs/{}", file_path)
+            } else {
+                format!("kosha/_hubs/{}", file_path)
+            };
+
+            if visited.contains(&full_path) {
+                return Ok(vec![]);
+            }
+            visited.insert(full_path.clone());
+
+            // Read the file
+            let kosha = if self.is_root {
+                self.root_kosha
+            } else {
+                self.current_kosha.unwrap_or(self.root_kosha)
+            };
+
+            let folder = if self.is_root { "hubs" } else { "_hubs" };
+            let path = format!("{}/{}", folder, file_path);
+
+            let content = match kosha.read_file(&path).await {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).to_string(),
+                Err(fastn_kosha::Error::NotFound(_)) => return Ok(vec![]),
+                Err(e) => return Err(Error::Kosha(e)),
+            };
+
+            let file = HubAuthFile::parse(&content);
+            let mut results = Vec::new();
+
+            // Derive alias from filename if including
+            let file_alias = file_path
+                .strip_suffix(".hubs")
+                .unwrap_or(file_path)
+                .rsplit('/')
+                .next()
+                .unwrap_or(file_path);
+
+            for entry in file.entries {
+                match entry {
+                    HubAuthEntry::Hub { id52, alias } => {
+                        // Use override alias if provided, otherwise use the original alias
+                        let final_alias = override_alias.unwrap_or(&alias);
+                        results.push(ResolvedHubAuth {
+                            id52,
+                            alias: final_alias.to_string(),
+                            source_file: path.clone(),
+                        });
+                    }
+                    HubAuthEntry::Include(name) => {
+                        // Include from same folder
+                        let include_path = format!("{}.hubs", name);
+                        let included = self
+                            .resolve(&include_path, Some(file_alias), visited)
+                            .await?;
+                        results.extend(included);
+                    }
+                    HubAuthEntry::IncludeRoot(name) => {
+                        // Include from root kosha
+                        let root_resolver = HubAuthResolver::for_root(self.root_kosha);
+                        let include_path = format!("{}.hubs", name);
+                        let included = root_resolver
+                            .resolve(&include_path, Some(file_alias), visited)
+                            .await?;
+                        results.extend(included);
+                    }
+                    HubAuthEntry::AliasRef(alias) => {
+                        // Reference a single hub by alias - look it up in all resolved hubs
+                        // For now, we defer this - the alias lookup happens at a higher level
+                        // after all files are resolved. We store it as a placeholder.
+                        // TODO: Implement proper alias lookup during resolution
+                        results.push(ResolvedHubAuth {
+                            id52: format!("@alias:{}", alias), // Placeholder for alias lookup
+                            alias: override_alias.unwrap_or(&alias).to_string(),
+                            source_file: path.clone(),
+                        });
+                    }
+                }
+            }
+
+            Ok(results)
+        })
+    }
+
+    /// Resolve all hub authorizations from a folder
+    pub async fn resolve_all(&self) -> Result<Vec<ResolvedHubAuth>> {
+        let kosha = if self.is_root {
+            self.root_kosha
+        } else {
+            self.current_kosha.unwrap_or(self.root_kosha)
+        };
+
+        let folder = if self.is_root { "hubs" } else { "_hubs" };
+
+        // List all .txt files in the folder
+        let entries = match kosha.list_dir(folder).await {
+            Ok(entries) => entries,
+            Err(fastn_kosha::Error::NotFound(_)) => return Ok(vec![]),
+            Err(e) => return Err(Error::Kosha(e)),
+        };
+
+        let mut all_results = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+
+        for entry in entries {
+            if entry.name.ends_with(".hubs") && !entry.is_dir {
+                let results = self.resolve(&entry.name, None, &mut visited).await?;
+                all_results.extend(results);
+            }
+        }
+
+        Ok(all_results)
+    }
+
+    /// Check if a hub ID52 is authorized
+    pub async fn is_authorized(&self, id52: &str) -> Result<Option<ResolvedHubAuth>> {
+        let all = self.resolve_all().await?;
+        Ok(all.into_iter().find(|h| h.id52 == id52))
+    }
+}
+
+/// A pending spoke connection (not yet authorized)
+#[derive(Debug, Clone)]
+pub struct PendingSpoke {
+    pub id52: String,
+    pub alias: String,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+
 /// The Hub server - application router
 pub struct Hub {
     /// Path to FASTN_HOME
@@ -70,6 +437,13 @@ pub struct Hub {
     secret_key: SecretKey,
     /// Configuration
     config: HubConfig,
+    /// Authorized spokes
+    spokes: SpokesConfig,
+    /// Pending spokes (unauthorized, awaiting add-spoke)
+    /// Key is the spoke's ID52
+    pending_spokes: HashMap<String, PendingSpoke>,
+    /// Root kosha for system configuration
+    root_kosha: Kosha,
     /// Registered koshas by alias
     koshas: HashMap<String, Kosha>,
     /// ACLs by (app, instance) -> Acl
@@ -110,7 +484,7 @@ impl Hub {
     /// Initialize a new hub
     ///
     /// Creates FASTN_HOME directory, generates a new secret key,
-    /// and saves the configuration.
+    /// creates root kosha, and writes empty spokes.txt.
     pub async fn init() -> Result<Self> {
         let home = Self::home_dir();
 
@@ -147,10 +521,59 @@ impl Hub {
         // Create koshas directory
         tokio::fs::create_dir_all(home.join("koshas")).await?;
 
+        // Create root kosha at FASTN_HOME/koshas/root/
+        let root_kosha_path = home.join("koshas").join("root");
+        let root_kosha = Kosha::open(root_kosha_path, "root".to_string()).await?;
+
+        // Write empty spokes.txt to root kosha
+        let spokes_content = b"# Authorized spokes (one per line)\n# Format: <id52>: <alias>\n";
+        root_kosha.write_file("spokes.txt", spokes_content).await?;
+
+        // Create hubs/ folder with a README explaining the format
+        let hubs_readme = b"# Hub Authorization Files\n\
+#\n\
+# This folder contains hub authorization lists (.hubs files).\n\
+# Each .hubs file can contain:\n\
+#\n\
+#   <id52>: <alias>    - authorize a hub with given alias\n\
+#   <id52>: <alias> # comment  - inline comments supported\n\
+#   # full line comment        - lines starting with '# ' are comments\n\
+#   @<filename>        - include all hubs from <filename>.hubs\n\
+#   @ROOT/<name>       - include from root kosha's hubs/<name>.hubs\n\
+#   #<alias>           - reference a single hub by its alias\n\
+#\n\
+# IMPORTANT: Each ID52 must be defined in exactly ONE file.\n\
+# IMPORTANT: Each alias must be globally unique.\n\
+#\n\
+# Example:\n\
+#   friends.hubs:\n\
+#     ABCD...XYZ: alice  # my friend Alice\n\
+#     EFGH...ABC: bob\n\
+#\n\
+#   family.hubs:\n\
+#     IJKL...DEF: mom\n\
+#     MNOP...GHI: dad\n\
+#\n\
+#   trusted.hubs:\n\
+#     @friends           # all from friends.hubs get alias 'trusted'\n\
+#     @family\n\
+#     #alice             # just Alice (reference by alias)\n\
+#\n\
+# ACL Integration:\n\
+#   _<name>.hubs corresponds to _<name>.wasm for access control.\n\
+#   Example: _read.hubs lists hubs that can access _read.wasm features.\n\
+";
+        root_kosha.write_file("hubs/README.txt", hubs_readme).await?;
+
+        let spokes = SpokesConfig::default();
+
         Ok(Self {
             home,
             secret_key,
             config,
+            spokes,
+            pending_spokes: HashMap::new(),
+            root_kosha,
             koshas: HashMap::new(),
             acls: HashMap::new(),
         })
@@ -158,7 +581,7 @@ impl Hub {
 
     /// Load an existing hub
     ///
-    /// Loads the secret key and configuration from FASTN_HOME.
+    /// Loads the secret key, configuration, and root kosha from FASTN_HOME.
     pub async fn load() -> Result<Self> {
         let home = Self::home_dir();
 
@@ -183,10 +606,27 @@ impl Hub {
         let config_json = tokio::fs::read_to_string(&config_path).await?;
         let config: HubConfig = serde_json::from_str(&config_json)?;
 
+        // Load root kosha
+        let root_kosha_path = home.join("koshas").join("root");
+        let root_kosha = Kosha::open(root_kosha_path, "root".to_string()).await?;
+
+        // Load spokes.txt from root kosha
+        let spokes = match root_kosha.read_file("spokes.txt").await {
+            Ok(content) => {
+                let content_str = String::from_utf8_lossy(&content);
+                SpokesConfig::parse(&content_str)
+            }
+            Err(fastn_kosha::Error::NotFound(_)) => SpokesConfig::default(),
+            Err(e) => return Err(Error::Kosha(e)),
+        };
+
         Ok(Self {
             home,
             secret_key,
             config,
+            spokes,
+            pending_spokes: HashMap::new(),
+            root_kosha,
             koshas: HashMap::new(),
             acls: HashMap::new(),
         })
@@ -199,6 +639,101 @@ impl Hub {
         } else {
             Self::init().await
         }
+    }
+
+    /// Record a pending spoke connection
+    ///
+    /// Called when an unauthorized spoke connects. Stores the alias for use
+    /// when the spoke is later authorized via add_spoke().
+    pub fn record_pending_spoke(&mut self, id52: &str, alias: &str) {
+        let now = Utc::now();
+        match self.pending_spokes.get_mut(id52) {
+            Some(pending) => {
+                pending.alias = alias.to_string();
+                pending.last_seen = now;
+            }
+            None => {
+                self.pending_spokes.insert(
+                    id52.to_string(),
+                    PendingSpoke {
+                        id52: id52.to_string(),
+                        alias: alias.to_string(),
+                        first_seen: now,
+                        last_seen: now,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Get pending spokes
+    pub fn pending_spokes(&self) -> &HashMap<String, PendingSpoke> {
+        &self.pending_spokes
+    }
+
+    /// List pending spokes
+    pub fn list_pending_spokes(&self) -> Vec<&PendingSpoke> {
+        self.pending_spokes.values().collect()
+    }
+
+    /// Add an authorized spoke
+    ///
+    /// Uses the alias from a pending connection if available.
+    /// If no pending connection exists, uses the first 8 characters of the ID52
+    /// as a fallback alias.
+    pub async fn add_spoke(&mut self, id52: &str) -> Result<String> {
+        // Validate ID52 format
+        fastn_net::from_id52(id52).map_err(|_| Error::InvalidId52(id52.to_string()))?;
+
+        // Get alias from pending connections, or use first 8 chars as fallback
+        let alias = self
+            .pending_spokes
+            .get(id52)
+            .map(|p| p.alias.clone())
+            .unwrap_or_else(|| id52[..8.min(id52.len())].to_string());
+
+        self.spokes.add(id52, &alias);
+        self.save_spokes().await?;
+
+        // Remove from pending
+        self.pending_spokes.remove(id52);
+
+        Ok(alias)
+    }
+
+    /// Remove an authorized spoke
+    pub async fn remove_spoke(&mut self, id52: &str) -> Result<bool> {
+        let removed = self.spokes.remove(id52);
+        if removed {
+            self.save_spokes().await?;
+        }
+        Ok(removed)
+    }
+
+    /// Check if a spoke is authorized
+    pub fn is_spoke_authorized(&self, id52: &str) -> bool {
+        self.spokes.is_authorized(id52)
+    }
+
+    /// Find a spoke by ID52
+    pub fn find_spoke(&self, id52: &str) -> Option<&AuthorizedSpoke> {
+        self.spokes.find_by_id52(id52)
+    }
+
+    /// List all authorized spokes
+    pub fn list_spokes(&self) -> &[AuthorizedSpoke] {
+        &self.spokes.spokes
+    }
+
+    /// Save spokes.txt to root kosha
+    async fn save_spokes(&self) -> Result<()> {
+        let mut content = String::from("# Authorized spokes (one per line)\n# Format: <id52>: <alias>\n");
+        if !self.spokes.spokes.is_empty() {
+            content.push_str(&self.spokes.to_string());
+            content.push('\n');
+        }
+        self.root_kosha.write_file("spokes.txt", content.as_bytes()).await?;
+        Ok(())
     }
 
     /// Register a kosha
@@ -377,6 +912,11 @@ impl Hub {
 /// Hub routes based on (app, instance) and does ACL check before forwarding
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
+    /// Spoke's alias (human-readable name)
+    /// Required on first connection, optional on subsequent connections.
+    /// The hub uses this to identify the spoke in pending connections.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     /// Application type (e.g., "kosha", "chat", "sync")
     pub app: String,
     /// Application instance (e.g., "my-kosha", "work-chat")
