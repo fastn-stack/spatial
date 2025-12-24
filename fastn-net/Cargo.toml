@@ -1,0 +1,16 @@
+[package]
+name = "fastn-net"
+version = "0.1.0"
+edition = "2024"
+description = "Minimal hub-spoke P2P networking over Iroh"
+
+[dependencies]
+iroh = { version = "0.91", features = ["discovery-local-network"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1", features = ["sync", "io-util"] }
+data-encoding = "2.6"
+
+[dev-dependencies]
+rand = "0.8"
