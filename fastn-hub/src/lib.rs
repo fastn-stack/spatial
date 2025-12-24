@@ -182,12 +182,16 @@ impl Hub {
     /// Routes based on hardcoded app names:
     /// - "kosha": routes to registered koshas
     pub async fn handle_request(&self, spoke_id52: &str, request: Request) -> std::result::Result<Response, HubError> {
+        // Extract path from payload for file operations (used in ACL checks)
+        let path = Self::extract_path_from_payload(&request.command, &request.payload);
+
         // Build access context
         let ctx = AccessContext {
             spoke_id52: spoke_id52.to_string(),
             app: request.app.clone(),
             instance: request.instance.clone(),
             command: request.command.clone(),
+            path,
         };
 
         // Check ACL via WASM modules
@@ -280,26 +284,41 @@ pub enum HubError {
 }
 
 // ============================================================================
-// ACL - WASM-based Access Control
+// ACL - WASM-based Access Control (Cascading)
 // ============================================================================
 //
-// Access control is delegated to WASM modules stored in a special "root" kosha.
+// Access control is cascading from top to bottom. Each level must ALLOW before
+// proceeding to the next level. If any level DENIES, access is immediately denied.
+// If no WASM module exists at a level, that level is skipped (implicit allow).
 //
-// File structure in root kosha:
-//   access.wasm              - Global ACL (fallback for all requests)
-//   kosha/<name>/access.wasm - Per-kosha general ACL
-//   kosha/<name>/read.wasm   - Per-kosha read-specific ACL (higher precedence)
-//   kosha/<name>/write.wasm  - Per-kosha write-specific ACL (higher precedence)
+// Hierarchy (checked in order, top to bottom):
 //
-// Each WASM module exports an `allowed` function:
-//   fn allowed(spoke_id52: &str, app: &str, instance: &str, command: &str) -> bool
+// 1. ROOT KOSHA - Global level (root/access.wasm)
+//    └── access.wasm - Global ACL for all requests
 //
-// Precedence (most specific wins):
-//   1. kosha/<name>/<command>.wasm (e.g., read.wasm, write.wasm)
-//   2. kosha/<name>/access.wasm
-//   3. access.wasm (global)
+// 2. ROOT KOSHA - App level (root/kosha/...)
+//    ├── access.wasm - All kosha operations
+//    ├── read.wasm   - All kosha read operations
+//    └── write.wasm  - All kosha write operations
 //
-// If no WASM module is found at any level, access is DENIED by default.
+// 3. ROOT KOSHA - Instance level (root/kosha/<name>/...)
+//    ├── access.wasm - This kosha's operations
+//    ├── read.wasm   - This kosha's reads
+//    └── write.wasm  - This kosha's writes
+//
+// 4. TARGET KOSHA - Folder levels (for file operations with paths)
+//    For path "foo/bar/file.txt", check each level:
+//    ├── /access.wasm, /read.wasm, /write.wasm  (root of target kosha)
+//    ├── /foo/access.wasm, /foo/read.wasm, ...
+//    └── /foo/bar/access.wasm, /foo/bar/read.wasm, ...
+//
+// At each level, precedence is: read/write.wasm (specific) > access.wasm (general)
+//
+// Flow:
+//   - Check level → DENY = stop, ALLOW = continue to next level
+//   - No module at level = implicit ALLOW (continue)
+//   - All levels pass = ALLOW
+//   - Must have at least one module somewhere (otherwise deny)
 
 /// Access control context passed to WASM modules
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,6 +331,8 @@ pub struct AccessContext {
     pub instance: String,
     /// Command being executed (e.g., "read_file", "write_file")
     pub command: String,
+    /// Path within the kosha (for file operations), None for non-path operations
+    pub path: Option<String>,
 }
 
 /// Result of an access check
@@ -328,11 +349,8 @@ pub enum AccessResult {
 impl Hub {
     /// Check if a spoke has access to perform a command on an (app, instance)
     ///
-    /// This is the main entry point for ACL checks. It:
-    /// 1. Looks up command-specific WASM (e.g., kosha/<name>/read.wasm)
-    /// 2. Falls back to instance-specific WASM (kosha/<name>/access.wasm)
-    /// 3. Falls back to global WASM (access.wasm)
-    /// 4. Denies if no module found
+    /// This implements cascading ACL checks from top to bottom.
+    /// Each level must ALLOW before proceeding. Any DENY stops immediately.
     pub async fn check_access(&self, ctx: &AccessContext) -> AccessResult {
         // Get the root kosha for ACL modules
         let root = match self.koshas.get("root") {
@@ -343,36 +361,98 @@ impl Hub {
             }
         };
 
-        // Determine the command category for WASM lookup
-        let command_category = Self::command_category(&ctx.command);
+        let category = Self::command_category(&ctx.command);
+        let mut found_any_module = false;
 
-        // 1. Try command-specific WASM: kosha/<instance>/<category>.wasm
-        if let Some(category) = command_category {
-            let path = format!("kosha/{}/{}.wasm", ctx.instance, category);
-            match self.run_access_wasm(root, &path, ctx).await {
-                AccessResult::Allowed => return AccessResult::Allowed,
-                AccessResult::Denied(reason) => return AccessResult::Denied(reason),
-                AccessResult::NoModule => {} // Continue to next level
+        // Level 1: Global ACL (root/access.wasm)
+        match self.check_level(root, "", category, ctx).await {
+            LevelResult::Denied(reason) => return AccessResult::Denied(reason),
+            LevelResult::Allowed => found_any_module = true,
+            LevelResult::NoModule => {}
+        }
+
+        // Level 2: App-level ACL (root/kosha/[access|read|write].wasm)
+        let app_prefix = format!("{}/", ctx.app);
+        match self.check_level(root, &app_prefix, category, ctx).await {
+            LevelResult::Denied(reason) => return AccessResult::Denied(reason),
+            LevelResult::Allowed => found_any_module = true,
+            LevelResult::NoModule => {}
+        }
+
+        // Level 3: Instance-level ACL (root/kosha/<instance>/[access|read|write].wasm)
+        let instance_prefix = format!("{}/{}/", ctx.app, ctx.instance);
+        match self.check_level(root, &instance_prefix, category, ctx).await {
+            LevelResult::Denied(reason) => return AccessResult::Denied(reason),
+            LevelResult::Allowed => found_any_module = true,
+            LevelResult::NoModule => {}
+        }
+
+        // Level 4: Target kosha folder-level ACL (for file operations with paths)
+        if let Some(ref path) = ctx.path {
+            // Get the target kosha
+            if let Some(target_kosha) = self.koshas.get(&ctx.instance) {
+                // Check each folder level from root to parent of target file
+                let path_segments: Vec<&str> = path.split('/').collect();
+                let mut current_prefix = String::new();
+
+                // Check kosha root level
+                match self.check_level(target_kosha, "", category, ctx).await {
+                    LevelResult::Denied(reason) => return AccessResult::Denied(reason),
+                    LevelResult::Allowed => found_any_module = true,
+                    LevelResult::NoModule => {}
+                }
+
+                // Check each folder level (excluding the file itself)
+                for segment in path_segments.iter().take(path_segments.len().saturating_sub(1)) {
+                    if current_prefix.is_empty() {
+                        current_prefix = format!("{}/", segment);
+                    } else {
+                        current_prefix = format!("{}{}/", current_prefix, segment);
+                    }
+
+                    match self.check_level(target_kosha, &current_prefix, category, ctx).await {
+                        LevelResult::Denied(reason) => return AccessResult::Denied(reason),
+                        LevelResult::Allowed => found_any_module = true,
+                        LevelResult::NoModule => {}
+                    }
+                }
             }
         }
 
-        // 2. Try instance-specific WASM: kosha/<instance>/access.wasm
-        let path = format!("kosha/{}/access.wasm", ctx.instance);
-        match self.run_access_wasm(root, &path, ctx).await {
-            AccessResult::Allowed => return AccessResult::Allowed,
-            AccessResult::Denied(reason) => return AccessResult::Denied(reason),
-            AccessResult::NoModule => {} // Continue to next level
+        // All levels passed, but we need at least one module to have been found
+        if found_any_module {
+            AccessResult::Allowed
+        } else {
+            AccessResult::Denied("No ACL module found at any level".to_string())
+        }
+    }
+
+    /// Check a single level for ACL modules
+    /// Returns Allowed if a module exists and allows, Denied if denies, NoModule if no module found
+    async fn check_level(
+        &self,
+        kosha: &Kosha,
+        prefix: &str,
+        category: Option<&str>,
+        ctx: &AccessContext,
+    ) -> LevelResult {
+        // First check category-specific module (read.wasm or write.wasm)
+        if let Some(cat) = category {
+            let path = format!("{}{}.wasm", prefix, cat);
+            match self.run_access_wasm(kosha, &path, ctx).await {
+                AccessResult::Allowed => return LevelResult::Allowed,
+                AccessResult::Denied(reason) => return LevelResult::Denied(reason),
+                AccessResult::NoModule => {} // Continue to check access.wasm
+            }
         }
 
-        // 3. Try global WASM: access.wasm
-        match self.run_access_wasm(root, "access.wasm", ctx).await {
-            AccessResult::Allowed => return AccessResult::Allowed,
-            AccessResult::Denied(reason) => return AccessResult::Denied(reason),
-            AccessResult::NoModule => {} // No module at any level
+        // Then check general access.wasm
+        let path = format!("{}access.wasm", prefix);
+        match self.run_access_wasm(kosha, &path, ctx).await {
+            AccessResult::Allowed => LevelResult::Allowed,
+            AccessResult::Denied(reason) => LevelResult::Denied(reason),
+            AccessResult::NoModule => LevelResult::NoModule,
         }
-
-        // 4. No ACL module found anywhere - deny by default
-        AccessResult::Denied("No ACL module found".to_string())
     }
 
     /// Map a command to its category (read, write, etc.)
@@ -387,15 +467,32 @@ impl Hub {
         }
     }
 
+    /// Extract the path from a request payload for file operations
+    /// Returns None for non-path operations (like kv_get, kv_set, etc.)
+    fn extract_path_from_payload(command: &str, payload: &serde_json::Value) -> Option<String> {
+        match command {
+            // File operations that use "path" field
+            "read_file" | "write_file" | "list_dir" | "get_versions" | "read_version" | "delete" => {
+                payload.get("path").and_then(|v| v.as_str()).map(|s| s.to_string())
+            }
+            // Rename uses "from" as the source path for ACL check
+            "rename" => {
+                payload.get("from").and_then(|v| v.as_str()).map(|s| s.to_string())
+            }
+            // KV operations and others don't have paths
+            _ => None,
+        }
+    }
+
     /// Run an access control WASM module
     async fn run_access_wasm(
         &self,
-        root: &Kosha,
+        kosha: &Kosha,
         path: &str,
         ctx: &AccessContext,
     ) -> AccessResult {
         // Try to read the WASM file
-        let wasm_bytes = match root.read_file(path).await {
+        let wasm_bytes = match kosha.read_file(path).await {
             Ok(bytes) => bytes,
             Err(_) => return AccessResult::NoModule,
         };
@@ -427,6 +524,13 @@ impl Hub {
         // We serialize AccessContext to JSON and pass it to the function
         todo!("execute_access_wasm - need WASM runtime integration")
     }
+}
+
+/// Result of checking a single ACL level
+enum LevelResult {
+    Allowed,
+    Denied(String),
+    NoModule,
 }
 
 // Legacy ACL types - kept for migration, will be removed
