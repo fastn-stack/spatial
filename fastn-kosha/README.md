@@ -45,6 +45,21 @@ kosha.read_file("path/to/file.txt").await?
 // Returns: Vec<u8>
 ```
 
+### Partial Read (Range-based)
+
+Files support partial reads with open-ended ranges:
+
+```rust
+// Read bytes 100-199
+kosha.read_file_range("path/to/file.txt", 100..200).await?
+
+// Read from byte 100 to end
+kosha.read_file_range("path/to/file.txt", 100..).await?
+
+// Read first 100 bytes
+kosha.read_file_range("path/to/file.txt", ..100).await?
+```
+
 ### Write File (with history)
 ```rust
 kosha.write_file("path/to/file.txt", content).await?
@@ -109,6 +124,62 @@ kosha.kv_transaction(|tx| {
     Ok(())
 }).await?
 ```
+
+## Watch for Changes
+
+Watch provides a unified interface to wait for changes to files or KV keys. The watch will block until a change occurs or the timeout expires.
+
+### Basic Watch
+
+```rust
+// Watch a single file
+kosha.watch("config.json", timeout).await?
+
+// Watch a pattern (glob-style)
+kosha.watch("logs/*", timeout).await?
+
+// Watch a KV key
+kosha.watch("settings/theme", timeout).await?
+```
+
+### Conditional Watch (If-Modified-Since)
+
+If you provide a `last_modified` timestamp, the watch returns immediately if the target is already newer:
+
+```rust
+// Only wait if file hasn't changed since our last read
+kosha.watch_since("config.json", last_modified, timeout).await?
+// Returns immediately if config.json was modified after last_modified
+```
+
+### Watch JSON Path in KV Keys
+
+For KV keys containing JSON, you can watch a specific JSON path within the value:
+
+```rust
+// Watch only the "theme" field inside the "settings" key
+kosha.watch_json_path("settings", "$.theme", timeout).await?
+
+// Watch nested paths
+kosha.watch_json_path("user/preferences", "$.display.fontSize", timeout).await?
+```
+
+### Watch Response
+
+```rust
+pub struct WatchResult {
+    pub path: String,           // Which path triggered the watch
+    pub modified: DateTime<Utc>, // When it was modified
+    pub is_file: bool,          // true for file, false for KV key
+}
+```
+
+### Important Notes
+
+- **Unified watch, separate read/write**: While watch works the same for files and KV keys, the actual read/write APIs remain separate (`read_file` vs `kv_get`, `write_file` vs `kv_set`).
+- **ACL**: Watch follows the same ACL rules as read operations. If you can't read a path, you can't watch it.
+- **Pattern matching**: Glob patterns like `foo/*` match both files and KV keys in that namespace.
+- **Timeout**: Always specify a reasonable timeout to avoid indefinite blocking.
 
 ## API Types
 
