@@ -168,6 +168,7 @@ pub struct DirEntry {
 }
 
 /// A Kosha - versioned file system with key-value store
+#[derive(Clone)]
 pub struct Kosha {
     /// Root path of this kosha on disk
     path: PathBuf,

@@ -53,6 +53,8 @@ pub struct SpokeConfig {
     pub spoke_id52: String,
     /// The hub's ID52 this spoke connects to
     pub hub_id52: String,
+    /// The hub's HTTP URL (e.g., "http://localhost:3000")
+    pub hub_url: String,
     /// Human-readable name/alias for this spoke
     pub alias: String,
     /// When the spoke was created
@@ -132,11 +134,11 @@ impl Spoke {
         &self.secret_key
     }
 
-    /// Initialize a new spoke with a hub ID52 and alias
+    /// Initialize a new spoke with a hub ID52, hub URL, and alias
     ///
     /// Creates SPOKE_HOME directory, generates a new secret key,
-    /// and saves the configuration with the hub ID52 and alias.
-    pub async fn init(hub_id52: &str, alias: &str) -> Result<Self> {
+    /// and saves the configuration with the hub ID52, hub URL, and alias.
+    pub async fn init(hub_id52: &str, hub_url: &str, alias: &str) -> Result<Self> {
         let home = Self::home_dir();
 
         // Check if already initialized
@@ -152,9 +154,9 @@ impl Spoke {
         tokio::fs::create_dir_all(&home).await?;
 
         // Generate new secret key
-        let secret_key = SecretKey::generate(&mut rand::thread_rng());
+        let secret_key = SecretKey::generate();
         let public_key = secret_key.public();
-        let spoke_id52 = fastn_net::to_id52(&public_key);
+        let spoke_id52 = public_key.id52();
 
         // Save secret key
         let key_path = home.join("spoke.key");
@@ -165,6 +167,7 @@ impl Spoke {
         let config = SpokeConfig {
             spoke_id52,
             hub_id52: hub_id52.to_string(),
+            hub_url: hub_url.to_string(),
             alias: alias.to_string(),
             created_at: Utc::now(),
         };
@@ -231,12 +234,17 @@ impl Spoke {
     }
 
     /// Load or initialize spoke
-    pub async fn load_or_init(hub_id52: &str, alias: &str) -> Result<Self> {
+    pub async fn load_or_init(hub_id52: &str, hub_url: &str, alias: &str) -> Result<Self> {
         if Self::is_initialized() {
             Self::load().await
         } else {
-            Self::init(hub_id52, alias).await
+            Self::init(hub_id52, hub_url, alias).await
         }
+    }
+
+    /// Get the hub's HTTP URL
+    pub fn hub_url(&self) -> &str {
+        &self.config.hub_url
     }
 
     /// Add a hub to known hubs
@@ -262,29 +270,26 @@ impl Spoke {
     }
 
     /// Connect to the configured hub
-    pub async fn connect(&self) -> Result<HubConnection> {
-        let spoke = fastn_net::Spoke::new(self.secret_key.clone(), &self.config.hub_id52).await?;
-        Ok(HubConnection {
+    pub fn connect(&self) -> HubConnection {
+        let client = fastn_net::client::Client::new(
+            self.secret_key.clone(),
+            self.config.hub_id52.clone(),
+            self.config.hub_url.clone(),
+        );
+        HubConnection {
             hub_id52: self.config.hub_id52.clone(),
             alias: self.config.alias.clone(),
-            spoke,
-        })
+            client,
+        }
     }
 
-    /// Try to connect to the hub, retrying until successful
-    ///
-    /// This will keep trying to connect every `retry_interval` until the hub accepts.
-    /// Returns once connected successfully.
-    pub async fn connect_with_retry(&self, retry_interval: std::time::Duration) -> Result<HubConnection> {
-        loop {
-            match self.connect().await {
-                Ok(conn) => return Ok(conn),
-                Err(e) => {
-                    eprintln!("Connection failed: {}. Retrying in {:?}...", e, retry_interval);
-                    tokio::time::sleep(retry_interval).await;
-                }
-            }
-        }
+    /// Connect to the hub (with HTTP, connection is made on each request)
+    /// This is provided for API compatibility, but with HTTP transport
+    /// the connection is per-request.
+    pub fn connect_with_retry(&self, _retry_interval: std::time::Duration) -> HubConnection {
+        // With HTTP transport, each request is independent
+        // No persistent connection to retry
+        self.connect()
     }
 }
 
@@ -294,8 +299,8 @@ pub struct HubConnection {
     hub_id52: String,
     /// The spoke's alias (sent with requests)
     alias: String,
-    /// The underlying spoke connection
-    spoke: fastn_net::Spoke,
+    /// The underlying HTTP client
+    client: fastn_net::client::Client,
 }
 
 impl HubConnection {
@@ -305,26 +310,35 @@ impl HubConnection {
     }
 
     /// Send a raw request to the hub
+    ///
+    /// - `target_hub`: "self" for local hub access, or hub alias for remote hub forwarding
+    /// - `app`: Application identifier (e.g., "kosha")
+    /// - `instance`: Instance name (e.g., kosha name)
+    /// - `command`: Command to execute
+    /// - `payload`: Request payload as JSON
+    ///
     /// Returns the response payload as JSON
     pub async fn send_request(
         &self,
+        target_hub: &str,
         app: &str,
         instance: &str,
         command: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        // Build the hub request with alias
+        // Build the hub request with alias and target hub
         let request = fastn_hub::Request {
             alias: Some(self.alias.clone()),
+            target_hub: target_hub.to_string(),
             app: app.to_string(),
             instance: instance.to_string(),
             command: command.to_string(),
             payload,
         };
 
-        // Call the hub
+        // Call the hub using HTTP client
         let result: std::result::Result<fastn_hub::Response, fastn_hub::HubError> =
-            self.spoke.call(request).await?;
+            self.client.call(&request).await?;
 
         match result {
             Ok(response) => Ok(response.payload),
@@ -342,11 +356,18 @@ impl HubConnection {
     }
 
     // Kosha file operations (convenience wrappers around send_request)
+    // All methods accept target_hub: "self" for local, or hub alias for remote
 
     /// Read a file from a kosha
     /// Returns: { content: base64 }
-    pub async fn read_file(&self, kosha: &str, path: &str) -> Result<serde_json::Value> {
+    pub async fn read_file(
+        &self,
+        target_hub: &str,
+        kosha: &str,
+        path: &str,
+    ) -> Result<serde_json::Value> {
         self.send_request(
+            target_hub,
             "kosha",
             kosha,
             "read_file",
@@ -359,6 +380,7 @@ impl HubConnection {
     /// Returns: { modified: timestamp }
     pub async fn write_file(
         &self,
+        target_hub: &str,
         kosha: &str,
         path: &str,
         content_base64: &str,
@@ -371,13 +393,20 @@ impl HubConnection {
         if let Some(bv) = base_version {
             payload["base_version"] = serde_json::Value::String(bv.to_string());
         }
-        self.send_request("kosha", kosha, "write_file", payload).await
+        self.send_request(target_hub, "kosha", kosha, "write_file", payload)
+            .await
     }
 
     /// List directory contents
     /// Returns: { entries: [...] }
-    pub async fn list_dir(&self, kosha: &str, path: &str) -> Result<serde_json::Value> {
+    pub async fn list_dir(
+        &self,
+        target_hub: &str,
+        kosha: &str,
+        path: &str,
+    ) -> Result<serde_json::Value> {
         self.send_request(
+            target_hub,
             "kosha",
             kosha,
             "list_dir",
@@ -388,8 +417,14 @@ impl HubConnection {
 
     /// Get file versions
     /// Returns: { versions: [...] }
-    pub async fn get_versions(&self, kosha: &str, path: &str) -> Result<serde_json::Value> {
+    pub async fn get_versions(
+        &self,
+        target_hub: &str,
+        kosha: &str,
+        path: &str,
+    ) -> Result<serde_json::Value> {
         self.send_request(
+            target_hub,
             "kosha",
             kosha,
             "get_versions",
@@ -402,11 +437,13 @@ impl HubConnection {
     /// Returns: { content: base64 }
     pub async fn read_version(
         &self,
+        target_hub: &str,
         kosha: &str,
         path: &str,
         timestamp: &str,
     ) -> Result<serde_json::Value> {
         self.send_request(
+            target_hub,
             "kosha",
             kosha,
             "read_version",
@@ -417,8 +454,15 @@ impl HubConnection {
 
     /// Rename a file
     /// Returns: {}
-    pub async fn rename(&self, kosha: &str, from: &str, to: &str) -> Result<serde_json::Value> {
+    pub async fn rename(
+        &self,
+        target_hub: &str,
+        kosha: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<serde_json::Value> {
         self.send_request(
+            target_hub,
             "kosha",
             kosha,
             "rename",
@@ -429,8 +473,14 @@ impl HubConnection {
 
     /// Delete a file
     /// Returns: {}
-    pub async fn delete(&self, kosha: &str, path: &str) -> Result<serde_json::Value> {
+    pub async fn delete(
+        &self,
+        target_hub: &str,
+        kosha: &str,
+        path: &str,
+    ) -> Result<serde_json::Value> {
         self.send_request(
+            target_hub,
             "kosha",
             kosha,
             "delete",
@@ -443,8 +493,14 @@ impl HubConnection {
 
     /// Get a value from the KV store
     /// Returns: { value: json | null }
-    pub async fn kv_get(&self, kosha: &str, key: &str) -> Result<serde_json::Value> {
+    pub async fn kv_get(
+        &self,
+        target_hub: &str,
+        kosha: &str,
+        key: &str,
+    ) -> Result<serde_json::Value> {
         self.send_request(
+            target_hub,
             "kosha",
             kosha,
             "kv_get",
@@ -457,11 +513,13 @@ impl HubConnection {
     /// Returns: {}
     pub async fn kv_set(
         &self,
+        target_hub: &str,
         kosha: &str,
         key: &str,
         value: serde_json::Value,
     ) -> Result<serde_json::Value> {
         self.send_request(
+            target_hub,
             "kosha",
             kosha,
             "kv_set",
@@ -472,8 +530,14 @@ impl HubConnection {
 
     /// Delete a key from the KV store
     /// Returns: {}
-    pub async fn kv_delete(&self, kosha: &str, key: &str) -> Result<serde_json::Value> {
+    pub async fn kv_delete(
+        &self,
+        target_hub: &str,
+        kosha: &str,
+        key: &str,
+    ) -> Result<serde_json::Value> {
         self.send_request(
+            target_hub,
             "kosha",
             kosha,
             "kv_delete",

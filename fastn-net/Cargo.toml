@@ -2,16 +2,28 @@
 name = "fastn-net"
 version = "0.1.0"
 edition = "2024"
-description = "Minimal hub-spoke P2P networking over Iroh"
+description = "Minimal hub-spoke P2P networking with HTTP transport and signed JSON"
 
 [dependencies]
-iroh = { version = "0.91", features = ["discovery-local-network"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-tokio = { version = "1", features = ["sync", "io-util", "rt"] }
 data-encoding = "2.6"
 tracing = "0.1"
 
+# HTTP client for spoke
+reqwest = { version = "0.12", features = ["json"], default-features = false, optional = true }
+
+# HTTP server for hub
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["sync", "rt"], optional = true }
+
+[features]
+default = ["client", "server"]
+client = ["dep:reqwest", "reqwest/rustls-tls"]
+server = ["dep:axum", "dep:tokio"]
+
 [dev-dependencies]
-rand = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

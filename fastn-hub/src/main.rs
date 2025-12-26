@@ -160,12 +160,33 @@ async fn main() {
         Some("help") | Some("-h") | Some("--help") => {
             print_help();
         }
-        None => {
-            // Run the hub server
+        Some("serve") => {
+            // Run the hub server with optional port
+            let port: u16 = args.get(2)
+                .and_then(|p| p.parse().ok())
+                .unwrap_or(3000);
+
             match Hub::load().await {
                 Ok(hub) => {
                     println!("Starting hub server...");
-                    if let Err(e) = hub.serve().await {
+                    if let Err(e) = hub.serve(port).await {
+                        eprintln!("Hub server error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to load hub: {}", e);
+                    eprintln!("Run 'fastn-hub init' first to initialize the hub.");
+                    std::process::exit(1);
+                }
+            }
+        }
+        None => {
+            // Run the hub server (default port 3000)
+            match Hub::load().await {
+                Ok(hub) => {
+                    println!("Starting hub server...");
+                    if let Err(e) = hub.serve(3000).await {
                         eprintln!("Hub server error: {}", e);
                         std::process::exit(1);
                     }
@@ -190,7 +211,8 @@ fn print_help() {
     println!();
     println!("Usage:");
     println!("  fastn-hub init                   Initialize a new hub");
-    println!("  fastn-hub                        Run the hub server");
+    println!("  fastn-hub                        Run the hub server (port 3000)");
+    println!("  fastn-hub serve [port]           Run the hub server on specified port");
     println!("  fastn-hub id                     Show the hub's ID52");
     println!("  fastn-hub info                   Show hub configuration");
     println!("  fastn-hub add-spoke <id52>       Authorize a spoke to connect");

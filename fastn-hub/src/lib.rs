@@ -17,7 +17,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use thiserror::Error;
 
-pub use fastn_net::{PublicKey, SecretKey};
+pub use fastn_net::SecretKey;
+use fastn_net::{SignedRequest, SignedResponse, ResponseEnvelope, ENDPOINT};
 
 /// Error types for hub operations
 #[derive(Error, Debug)]
@@ -500,7 +501,7 @@ impl Hub {
         tokio::fs::create_dir_all(&home).await?;
 
         // Generate new secret key
-        let secret_key = SecretKey::generate(&mut rand::thread_rng());
+        let secret_key = SecretKey::generate();
         let public_key = secret_key.public();
         let hub_id52 = fastn_net::to_id52(&public_key);
 
@@ -567,6 +568,10 @@ impl Hub {
 
         let spokes = SpokesConfig::default();
 
+        // Register root kosha in the koshas map so it can be accessed via "root" instance
+        let mut koshas = HashMap::new();
+        koshas.insert("root".to_string(), root_kosha.clone());
+
         Ok(Self {
             home,
             secret_key,
@@ -574,7 +579,7 @@ impl Hub {
             spokes,
             pending_spokes: HashMap::new(),
             root_kosha,
-            koshas: HashMap::new(),
+            koshas,
             acls: HashMap::new(),
         })
     }
@@ -620,6 +625,10 @@ impl Hub {
             Err(e) => return Err(Error::Kosha(e)),
         };
 
+        // Register root kosha in the koshas map so it can be accessed via "root" instance
+        let mut koshas = HashMap::new();
+        koshas.insert("root".to_string(), root_kosha.clone());
+
         Ok(Self {
             home,
             secret_key,
@@ -627,7 +636,7 @@ impl Hub {
             spokes,
             pending_spokes: HashMap::new(),
             root_kosha,
-            koshas: HashMap::new(),
+            koshas,
             acls: HashMap::new(),
         })
     }
@@ -793,41 +802,49 @@ impl Hub {
     /// The `requester_hub_id` is the hub ID of the spoke making the request.
     /// Each user has their own hub, so requester_hub_id == self.id52() means
     /// the request is from the hub owner.
+    ///
+    /// When `target_hub` is "self", ACL checks are skipped - the spoke has full
+    /// access to its own hub's resources.
     pub async fn handle_request(
         &self,
         spoke_id52: &str,
         requester_hub_id: &str,
         request: Request,
     ) -> std::result::Result<Response, HubError> {
-        // Extract path from payload for file operations (used in ACL checks)
-        let path = Self::extract_path_from_payload(&request.command, &request.payload);
+        // For target_hub="self", skip ACL checks - spoke has full access to own hub
+        let skip_acl = request.target_hub == "self";
 
-        // Build access context with hub IDs
-        let ctx = AccessContext {
-            requester_hub_id: requester_hub_id.to_string(),
-            current_hub_id: self.config.hub_id52.clone(),
-            spoke_id52: spoke_id52.to_string(),
-            app: request.app.clone(),
-            instance: request.instance.clone(),
-            command: request.command.clone(),
-            path,
-        };
+        if !skip_acl {
+            // Extract path from payload for file operations (used in ACL checks)
+            let path = Self::extract_path_from_payload(&request.command, &request.payload);
 
-        // Check ACL via WASM modules
-        match self.check_access(&ctx).await {
-            AccessResult::Allowed => {}
-            AccessResult::Denied(_reason) => {
-                return Err(HubError::AccessDenied {
-                    app: request.app.clone(),
-                    instance: request.instance.clone(),
-                });
-            }
-            AccessResult::NoModule => {
-                // This shouldn't happen as check_access returns Denied if no module found
-                return Err(HubError::AccessDenied {
-                    app: request.app.clone(),
-                    instance: request.instance.clone(),
-                });
+            // Build access context with hub IDs
+            let ctx = AccessContext {
+                requester_hub_id: requester_hub_id.to_string(),
+                current_hub_id: self.config.hub_id52.clone(),
+                spoke_id52: spoke_id52.to_string(),
+                app: request.app.clone(),
+                instance: request.instance.clone(),
+                command: request.command.clone(),
+                path,
+            };
+
+            // Check ACL via WASM modules
+            match self.check_access(&ctx).await {
+                AccessResult::Allowed => {}
+                AccessResult::Denied(_reason) => {
+                    return Err(HubError::AccessDenied {
+                        app: request.app.clone(),
+                        instance: request.instance.clone(),
+                    });
+                }
+                AccessResult::NoModule => {
+                    // This shouldn't happen as check_access returns Denied if no module found
+                    return Err(HubError::AccessDenied {
+                        app: request.app.clone(),
+                        instance: request.instance.clone(),
+                    });
+                }
             }
         }
 
@@ -863,44 +880,79 @@ impl Hub {
 
     /// Run the hub server
     ///
-    /// Starts the iroh endpoint and accepts connections in a loop.
-    /// For each request, routes to the appropriate handler.
-    pub async fn serve(self) -> Result<()> {
-        // Create the network hub
-        let net_hub = fastn_net::Hub::new(self.secret_key.clone()).await?;
+    /// Starts an HTTP server and listens for signed JSON requests.
+    /// Default port is 3000 unless overridden.
+    pub async fn serve(self, port: u16) -> Result<()> {
+        use axum::{
+            http::StatusCode,
+            routing::post,
+            Json, Router,
+        };
+        use std::sync::Arc;
 
-        println!("Hub listening on ID52: {}", net_hub.id52());
-        println!("FASTN_HOME: {:?}", self.home);
+        let hub = Arc::new(self);
 
-        // Accept connections in a loop
-        loop {
-            match net_hub.accept::<Request>().await {
-                Ok((peer_key, request, responder)) => {
-                    let peer_id52 = fastn_net::to_id52(&peer_key);
+        println!("Hub ID52: {}", hub.config.hub_id52);
+        println!("FASTN_HOME: {:?}", hub.home);
+        println!("Listening on http://0.0.0.0:{}{}", port, ENDPOINT);
+
+        // Create the axum handler
+        let hub_clone = hub.clone();
+        let secret_key = hub.secret_key.clone();
+
+        let app = Router::new()
+            .route(ENDPOINT, post(move |Json(signed_req): Json<SignedRequest>| {
+                let hub = hub_clone.clone();
+                let secret_key = secret_key.clone();
+                async move {
+                    // Verify and extract the request
+                    let (sender_id52, request): (String, Request) = match signed_req.verify() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::warn!("Request verification failed: {}", e);
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({"error": e.to_string()})),
+                            );
+                        }
+                    };
 
                     // For now, we assume the requester's hub ID is the same as their spoke ID
-                    // In a full implementation, this would be extracted from the request
-                    // or looked up from a registry
-                    let requester_hub_id = peer_id52.clone();
+                    let requester_hub_id = sender_id52.clone();
 
-                    match self.handle_request(&peer_id52, &requester_hub_id, request).await {
-                        Ok(response) => {
-                            if let Err(e) = responder.respond::<Response, HubError>(Ok(response)).await {
-                                eprintln!("Failed to send response: {}", e);
-                            }
+                    // Handle the request
+                    let result = hub.handle_request(&sender_id52, &requester_hub_id, request).await;
+
+                    // Wrap in envelope and sign response
+                    let envelope: ResponseEnvelope<Response, HubError> = match result {
+                        Ok(res) => ResponseEnvelope::Ok(res),
+                        Err(err) => ResponseEnvelope::Err(err),
+                    };
+
+                    let signed_res = match SignedResponse::new(&secret_key, &envelope) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            tracing::error!("Failed to sign response: {}", e);
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({"error": "Failed to sign response"})),
+                            );
                         }
-                        Err(hub_error) => {
-                            if let Err(e) = responder.respond::<Response, HubError>(Err(hub_error)).await {
-                                eprintln!("Failed to send error response: {}", e);
-                            }
-                        }
-                    }
+                    };
+
+                    (StatusCode::OK, Json(serde_json::to_value(signed_res).unwrap()))
                 }
-                Err(e) => {
-                    eprintln!("Failed to accept connection: {}", e);
-                }
-            }
-        }
+            }));
+
+        // Bind and serve
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let listener = tokio::net::TcpListener::bind(addr).await
+            .map_err(|e| Error::Io(e))?;
+
+        axum::serve(listener, app).await
+            .map_err(|e| Error::Io(e))?;
+
+        Ok(())
     }
 }
 
@@ -917,6 +969,10 @@ pub struct Request {
     /// The hub uses this to identify the spoke in pending connections.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// Target hub alias: "self" for local hub, or alias of a remote hub
+    /// If not specified, defaults to "self"
+    #[serde(default = "default_target_hub")]
+    pub target_hub: String,
     /// Application type (e.g., "kosha", "chat", "sync")
     pub app: String,
     /// Application instance (e.g., "my-kosha", "work-chat")
@@ -925,6 +981,10 @@ pub struct Request {
     pub command: String,
     /// Application-specific payload (JSON)
     pub payload: serde_json::Value,
+}
+
+fn default_target_hub() -> String {
+    "self".to_string()
 }
 
 /// Response envelope to spokes
