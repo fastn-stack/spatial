@@ -53,23 +53,25 @@ pub fn app(_attr: TokenStream, item: TokenStream) -> TokenStream {
         /// Get pointer to the result buffer (initial commands or last on_event result)
         #[unsafe(no_mangle)]
         pub extern "C" fn get_result_ptr(app_ptr: i32) -> i32 {
-            fastn::wasm_bridge::get_result_ptr(app_ptr as *const fastn::wasm_bridge::CoreApp) as i32
+            unsafe { fastn::wasm_bridge::get_result_ptr(app_ptr as *const fastn::wasm_bridge::CoreApp) as i32 }
         }
 
         /// Get length of the result buffer
         #[unsafe(no_mangle)]
         pub extern "C" fn get_result_len(app_ptr: i32) -> i32 {
-            fastn::wasm_bridge::get_result_len(app_ptr as *const fastn::wasm_bridge::CoreApp) as i32
+            unsafe { fastn::wasm_bridge::get_result_len(app_ptr as *const fastn::wasm_bridge::CoreApp) as i32 }
         }
 
         /// Process an event. Returns pointer to result JSON.
         #[unsafe(no_mangle)]
         pub extern "C" fn on_event(app_ptr: i32, event_ptr: i32, event_len: i32) -> i32 {
-            fastn::wasm_bridge::app_on_event(
-                app_ptr as *mut fastn::wasm_bridge::CoreApp,
-                event_ptr as *const u8,
-                event_len as usize
-            ) as i32
+            unsafe {
+                fastn::wasm_bridge::app_on_event(
+                    app_ptr as *mut fastn::wasm_bridge::CoreApp,
+                    event_ptr as *const u8,
+                    event_len as usize
+                ) as i32
+            }
         }
 
         #[unsafe(no_mangle)]

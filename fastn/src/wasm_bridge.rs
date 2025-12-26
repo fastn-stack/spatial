@@ -63,23 +63,33 @@ pub fn create_app(content: &crate::RealityViewContent) -> *mut CoreApp {
 }
 
 /// Get pointer to the result buffer (initial commands or last on_event result)
+///
+/// # Safety
+/// `app_ptr` must be a valid pointer returned by `create_app` and not yet destroyed.
 #[doc(hidden)]
-pub fn get_result_ptr(app_ptr: *const CoreApp) -> *const u8 {
+pub unsafe fn get_result_ptr(app_ptr: *const CoreApp) -> *const u8 {
     let app = unsafe { &*app_ptr };
     app.result_ptr()
 }
 
 /// Get length of the result buffer
+///
+/// # Safety
+/// `app_ptr` must be a valid pointer returned by `create_app` and not yet destroyed.
 #[doc(hidden)]
-pub fn get_result_len(app_ptr: *const CoreApp) -> usize {
+pub unsafe fn get_result_len(app_ptr: *const CoreApp) -> usize {
     let app = unsafe { &*app_ptr };
     app.result_len()
 }
 
 /// Process an event on the CoreApp
 /// Returns pointer to commands JSON. Call get_result_len for length.
+///
+/// # Safety
+/// - `app_ptr` must be a valid pointer returned by `create_app` and not yet destroyed.
+/// - `event_ptr` must be a valid pointer to `event_len` bytes of valid memory.
 #[doc(hidden)]
-pub fn app_on_event(app_ptr: *mut CoreApp, event_ptr: *const u8, event_len: usize) -> *const u8 {
+pub unsafe fn app_on_event(app_ptr: *mut CoreApp, event_ptr: *const u8, event_len: usize) -> *const u8 {
     let app = unsafe { &mut *app_ptr };
 
     // Parse the event JSON
@@ -106,8 +116,12 @@ pub fn app_on_event(app_ptr: *mut CoreApp, event_ptr: *const u8, event_len: usiz
 }
 
 /// Destroy a CoreApp (call when done)
+///
+/// # Safety
+/// `app_ptr` must be a valid pointer returned by `create_app` and not yet destroyed,
+/// or null (which is a no-op).
 #[doc(hidden)]
-pub fn destroy_app(app_ptr: *mut CoreApp) {
+pub unsafe fn destroy_app(app_ptr: *mut CoreApp) {
     if !app_ptr.is_null() {
         unsafe { drop(Box::from_raw(app_ptr)); }
     }
