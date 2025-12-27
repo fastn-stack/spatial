@@ -21,3 +21,6 @@ target
 .idea/
 
 *.wasm
+
+# Tauri generated files
+**/gen/

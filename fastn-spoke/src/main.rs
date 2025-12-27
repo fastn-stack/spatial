@@ -2,7 +2,7 @@
 //!
 //! Usage:
 //!   fastn-spoke init <hub-id52>  - Initialize spoke with a hub to connect to
-//!   fastn-spoke                  - Run the spoke (connects to hub, retries until accepted)
+//!   fastn-spoke                  - Run the spoke (launches GUI if enabled, otherwise shows info)
 //!   fastn-spoke id               - Show the spoke's ID52
 //!   fastn-spoke kosha <op>       - Kosha operations (read-file, write-file, list-dir, etc.)
 
@@ -11,6 +11,9 @@ use std::env;
 use std::path::PathBuf;
 
 mod kosha;
+
+#[cfg(feature = "gui")]
+mod gui;
 
 /// Get the spoke home directory from SPOKE_HOME env var or use the default
 fn get_home() -> PathBuf {
@@ -122,25 +125,35 @@ async fn main() {
             print_help();
         }
         None => {
-            // With HTTP transport, there's no persistent connection
-            // Just show info and suggest using kosha commands
-            match Spoke::load(&home).await {
-                Ok(spoke) => {
-                    println!("Spoke ID52: {}", spoke.id52());
-                    println!("Hub ID52:   {}", spoke.hub_id52());
-                    println!("Hub URL:    {}", spoke.hub_url());
-                    println!();
-                    println!("With HTTP transport, each request is independent.");
-                    println!("Use 'fastn-spoke kosha' commands to interact with the hub.");
-                    println!();
-                    println!("Example:");
-                    println!("  fastn-spoke kosha read-file self root spokes.txt");
-                }
-                Err(e) => {
-                    eprintln!("Failed to load spoke: {}", e);
-                    eprintln!();
-                    eprintln!("Run 'fastn-spoke init <hub-id52> <hub-url> <alias>' first to initialize.");
-                    std::process::exit(1);
+            #[cfg(feature = "gui")]
+            {
+                // Launch Tauri GUI
+                gui::run(home);
+                return;
+            }
+
+            #[cfg(not(feature = "gui"))]
+            {
+                // With HTTP transport, there's no persistent connection
+                // Just show info and suggest using kosha commands
+                match Spoke::load(&home).await {
+                    Ok(spoke) => {
+                        println!("Spoke ID52: {}", spoke.id52());
+                        println!("Hub ID52:   {}", spoke.hub_id52());
+                        println!("Hub URL:    {}", spoke.hub_url());
+                        println!();
+                        println!("With HTTP transport, each request is independent.");
+                        println!("Use 'fastn-spoke kosha' commands to interact with the hub.");
+                        println!();
+                        println!("Example:");
+                        println!("  fastn-spoke kosha read-file self root spokes.txt");
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to load spoke: {}", e);
+                        eprintln!();
+                        eprintln!("Run 'fastn-spoke init <hub-id52> <hub-url> <alias>' first to initialize.");
+                        std::process::exit(1);
+                    }
                 }
             }
         }
