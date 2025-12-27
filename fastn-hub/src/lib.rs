@@ -1382,6 +1382,10 @@ impl Hub {
         // All levels passed, but we need at least one module to have been found
         if found_any_module {
             AccessResult::Allowed
+        } else if ctx.is_owner() || self.spokes.is_authorized(&ctx.spoke_id52) {
+            // Trusted spokes (owner or in spokes.txt) are allowed by default
+            // when no ACL modules are configured
+            AccessResult::Allowed
         } else {
             AccessResult::Denied("No ACL module found at any level".to_string())
         }
