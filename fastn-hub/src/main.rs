@@ -7,16 +7,27 @@
 
 use fastn_hub::Hub;
 use std::env;
+use std::path::PathBuf;
+
+/// Get the hub home directory from FASTN_HOME env var or use the default
+fn get_home() -> PathBuf {
+    if let Ok(home) = env::var("FASTN_HOME") {
+        PathBuf::from(home)
+    } else {
+        Hub::default_home()
+    }
+}
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
+    let home = get_home();
 
     let command = args.get(1).map(|s| s.as_str());
 
     match command {
         Some("init") => {
-            match Hub::init().await {
+            match Hub::init(home).await {
                 Ok(hub) => {
                     println!("Hub initialized successfully!");
                     println!("ID52: {}", hub.id52());
@@ -29,7 +40,7 @@ async fn main() {
             }
         }
         Some("id") => {
-            match Hub::load().await {
+            match Hub::load(&home).await {
                 Ok(hub) => {
                     println!("{}", hub.id52());
                 }
@@ -40,7 +51,7 @@ async fn main() {
             }
         }
         Some("info") => {
-            match Hub::load().await {
+            match Hub::load(&home).await {
                 Ok(hub) => {
                     println!("Hub ID52: {}", hub.id52());
                     println!("Home:     {:?}", hub.home());
@@ -68,7 +79,7 @@ async fn main() {
                 }
             };
 
-            match Hub::load().await {
+            match Hub::load(&home).await {
                 Ok(mut hub) => {
                     match hub.add_spoke(id52).await {
                         Ok(alias) => {
@@ -89,7 +100,7 @@ async fn main() {
             }
         }
         Some("list-pending") => {
-            match Hub::load().await {
+            match Hub::load(&home).await {
                 Ok(hub) => {
                     let pending = hub.list_pending_spokes();
                     if pending.is_empty() {
@@ -116,7 +127,7 @@ async fn main() {
                 }
             };
 
-            match Hub::load().await {
+            match Hub::load(&home).await {
                 Ok(mut hub) => {
                     match hub.remove_spoke(id52).await {
                         Ok(true) => {
@@ -139,7 +150,7 @@ async fn main() {
             }
         }
         Some("list-spokes") => {
-            match Hub::load().await {
+            match Hub::load(&home).await {
                 Ok(hub) => {
                     let spokes = hub.list_spokes();
                     if spokes.is_empty() {
@@ -166,7 +177,7 @@ async fn main() {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(3000);
 
-            match Hub::load().await {
+            match Hub::load(&home).await {
                 Ok(hub) => {
                     println!("Starting hub server...");
                     if let Err(e) = hub.serve(port).await {
@@ -183,7 +194,7 @@ async fn main() {
         }
         None => {
             // Run the hub server (default port 3000)
-            match Hub::load().await {
+            match Hub::load(&home).await {
                 Ok(hub) => {
                     println!("Starting hub server...");
                     if let Err(e) = hub.serve(3000).await {

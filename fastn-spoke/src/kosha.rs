@@ -13,13 +13,14 @@
 //!   <alias>  - Access a remote hub via hub-to-hub forwarding (ACL applies)
 
 use fastn_spoke::Spoke;
+use std::path::Path;
 
 /// Run the kosha subcommand
-pub async fn run(args: &[String]) {
+pub async fn run(args: &[String], home: &Path) {
     let op = args.first().map(|s| s.as_str());
 
     match op {
-        Some("read-file") => read_file(&args[1..]).await,
+        Some("read-file") => read_file(&args[1..], home).await,
         Some("write-file") | Some("list-dir") | Some("get-versions") | Some("read-version")
         | Some("rename") | Some("delete") | Some("kv-get") | Some("kv-set") | Some("kv-delete") => {
             eprintln!("Not implemented yet: {}", op.unwrap());
@@ -68,7 +69,7 @@ fn print_help() {
 
 /// Read a file from a kosha
 /// Usage: read-file <hub> <kosha> <path>
-async fn read_file(args: &[String]) {
+async fn read_file(args: &[String], home: &Path) {
     if args.len() < 3 {
         eprintln!("Usage: fastn-spoke kosha read-file <hub> <kosha> <path>");
         eprintln!();
@@ -87,7 +88,7 @@ async fn read_file(args: &[String]) {
     let path = &args[2];
 
     // Load the spoke
-    let spoke = match Spoke::load().await {
+    let spoke = match Spoke::load(home).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to load spoke: {}", e);

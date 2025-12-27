@@ -8,12 +8,23 @@
 
 use fastn_spoke::Spoke;
 use std::env;
+use std::path::PathBuf;
 
 mod kosha;
+
+/// Get the spoke home directory from SPOKE_HOME env var or use the default
+fn get_home() -> PathBuf {
+    if let Ok(home) = env::var("SPOKE_HOME") {
+        PathBuf::from(home)
+    } else {
+        Spoke::default_home()
+    }
+}
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
+    let home = get_home();
 
     let command = args.get(1).map(|s| s.as_str());
 
@@ -57,7 +68,7 @@ async fn main() {
                 }
             };
 
-            match Spoke::init(hub_id52, hub_url, alias).await {
+            match Spoke::init(home, hub_id52, hub_url, alias).await {
                 Ok(spoke) => {
                     println!("Spoke initialized successfully!");
                     println!();
@@ -79,7 +90,7 @@ async fn main() {
             }
         }
         Some("id") => {
-            match Spoke::load().await {
+            match Spoke::load(&home).await {
                 Ok(spoke) => {
                     println!("{}", spoke.id52());
                 }
@@ -90,7 +101,7 @@ async fn main() {
             }
         }
         Some("info") => {
-            match Spoke::load().await {
+            match Spoke::load(&home).await {
                 Ok(spoke) => {
                     println!("Spoke ID52: {}", spoke.id52());
                     println!("Alias:      {}", spoke.alias());
@@ -105,7 +116,7 @@ async fn main() {
             }
         }
         Some("kosha") => {
-            kosha::run(&args[2..]).await;
+            kosha::run(&args[2..], &home).await;
         }
         Some("help") | Some("-h") | Some("--help") => {
             print_help();
@@ -113,7 +124,7 @@ async fn main() {
         None => {
             // With HTTP transport, there's no persistent connection
             // Just show info and suggest using kosha commands
-            match Spoke::load().await {
+            match Spoke::load(&home).await {
                 Ok(spoke) => {
                     println!("Spoke ID52: {}", spoke.id52());
                     println!("Hub ID52:   {}", spoke.hub_id52());

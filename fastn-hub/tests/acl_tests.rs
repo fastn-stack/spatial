@@ -14,10 +14,8 @@ async fn create_test_hub(name: &str, _port: u16) -> (Hub, PathBuf, String) {
     let _ = std::fs::remove_dir_all(&temp_dir);
     std::fs::create_dir_all(&temp_dir).expect("Failed to create test directory");
 
-    // SAFETY: We're in a test environment and only setting FASTN_HOME
-    unsafe { std::env::set_var("FASTN_HOME", &temp_dir) };
-
-    let hub = Hub::init().await.expect("Failed to init hub");
+    // Use init to explicitly pass the path instead of relying on env var
+    let hub = Hub::init(temp_dir.clone()).await.expect("Failed to init hub");
     let id52 = hub.id52().to_string();
 
     (hub, temp_dir, id52)
@@ -57,22 +55,21 @@ async fn authorize_spoke(hub_dir: &PathBuf, spoke_id52: &str, alias: &str) {
 async fn test_spoke_access_own_hub() {
     // Test: A spoke should be able to read files from its own hub
 
-    let (hub, hub_dir, hub_id52) = create_test_hub("own-hub", 4000).await;
+    let (mut hub, hub_dir, _hub_id52) = create_test_hub("own-hub", 4000).await;
 
     // Create a spoke key
     let spoke_key = SecretKey::generate();
     let spoke_id52 = spoke_key.public().id52();
 
-    // Authorize the spoke
-    authorize_spoke(&hub_dir, &spoke_id52, "test-spoke").await;
+    // Authorize the spoke using hub.add_spoke() to update in-memory state
+    hub.add_spoke(&spoke_id52).await.expect("Failed to add spoke");
 
     // Write a test file
     write_test_file(&hub_dir, "hello.txt", "Hello, World!").await;
 
-    // Create a read_file request (from the spoke's hub = our hub, so it's an "owner" request)
+    // Create a read_file request
+    // The spoke's identity is verified via cryptographic signature (spoke_id52)
     let request = Request {
-        alias: Some("test-spoke".to_string()),
-        from_hub: hub_id52.clone(),
         target_hub: "self".to_string(),
         app: "kosha".to_string(),
         instance: "root".to_string(),
@@ -80,8 +77,8 @@ async fn test_spoke_access_own_hub() {
         payload: serde_json::json!({ "path": "hello.txt" }),
     };
 
-    // Handle the request
-    let result = hub.handle_request(&spoke_id52, &hub_id52, request).await;
+    // Handle the request - sender identity derived from spoke_id52
+    let result = hub.handle_request(&spoke_id52, request).await;
 
     // Should succeed
     assert!(result.is_ok(), "Spoke should be able to read from its own hub");
@@ -102,17 +99,14 @@ async fn test_spoke_access_own_hub() {
 
 #[tokio::test]
 async fn test_cross_hub_access_authorized() {
-    // Test: A spoke from Hub1 should be able to read files from Hub2 when Hub1 is authorized
+    // Test: Hub1 (forwarding for its spoke) should be able to read files from Hub2 when Hub1 is authorized
+    // In the new design, cross-hub requests are signed by the forwarding hub, so we verify hub1's identity
 
     let (hub2, hub2_dir, _hub2_id52) = create_test_hub("cross-hub2", 4002).await;
 
     // Create Hub1's identity (we just need the ID52 for authorization)
     let hub1_key = SecretKey::generate();
     let hub1_id52 = hub1_key.public().id52();
-
-    // Create a spoke identity for Hub1
-    let spoke_key = SecretKey::generate();
-    let spoke_id52 = spoke_key.public().id52();
 
     // Authorize Hub1 in Hub2's .hubs file
     let hubs_content = format!(
@@ -125,10 +119,9 @@ async fn test_cross_hub_access_authorized() {
     // Write a test file in Hub2
     write_test_file(&hub2_dir, "secret.txt", "Hub2 Secret Data").await;
 
-    // Create a request from Hub1's spoke to Hub2
+    // Create a request that Hub1 is forwarding to Hub2
+    // The sender identity (hub1_id52) is verified from the cryptographic signature
     let request = Request {
-        alias: Some("hub1-spoke".to_string()),
-        from_hub: hub1_id52.clone(),  // This spoke belongs to Hub1
         target_hub: "self".to_string(),  // Direct request to Hub2
         app: "kosha".to_string(),
         instance: "root".to_string(),
@@ -137,8 +130,8 @@ async fn test_cross_hub_access_authorized() {
     };
 
     // Handle the request at Hub2
-    // Note: spoke_id52 is from Hub1, but we're checking if hub1_id52 is authorized
-    let result = hub2.handle_request(&spoke_id52, &hub1_id52, request).await;
+    // The sender (hub1_id52) is verified via signature, and we check if it's in .hubs files
+    let result = hub2.handle_request(&hub1_id52, request).await;
 
     // Should succeed because Hub1 is authorized
     assert!(result.is_ok(), "Cross-hub access should succeed when hub is authorized: {:?}", result.err());
@@ -156,7 +149,8 @@ async fn test_cross_hub_access_authorized() {
 
 #[tokio::test]
 async fn test_cross_hub_access_denied() {
-    // Test: A spoke from an unauthorized hub should be denied access
+    // Test: An unauthorized hub should be denied access
+    // In the new design, the sender identity is verified from the signature
 
     let (hub2, hub2_dir, _hub2_id52) = create_test_hub("deny-hub2", 4004).await;
 
@@ -164,19 +158,14 @@ async fn test_cross_hub_access_denied() {
     let unauthorized_hub_key = SecretKey::generate();
     let unauthorized_hub_id52 = unauthorized_hub_key.public().id52();
 
-    // Create a spoke identity for the unauthorized hub
-    let spoke_key = SecretKey::generate();
-    let spoke_id52 = spoke_key.public().id52();
-
     // Note: We don't add the unauthorized hub to Hub2's .hubs file
 
     // Write a test file in Hub2
     write_test_file(&hub2_dir, "protected.txt", "Protected Data").await;
 
-    // Create a request from the unauthorized hub's spoke to Hub2
+    // Create a request from the unauthorized hub to Hub2
+    // The sender identity (unauthorized_hub_id52) is verified from the signature
     let request = Request {
-        alias: Some("unauthorized-spoke".to_string()),
-        from_hub: unauthorized_hub_id52.clone(),
         target_hub: "self".to_string(),
         app: "kosha".to_string(),
         instance: "root".to_string(),
@@ -185,17 +174,17 @@ async fn test_cross_hub_access_denied() {
     };
 
     // Handle the request at Hub2
-    let result = hub2.handle_request(&spoke_id52, &unauthorized_hub_id52, request).await;
+    // The unauthorized hub's identity is verified via signature
+    let result = hub2.handle_request(&unauthorized_hub_id52, request).await;
 
-    // Should fail with AccessDenied
+    // Should fail with Unauthorized (sender not recognized as spoke or authorized hub)
     assert!(result.is_err(), "Cross-hub access should be denied when hub is not authorized");
 
     match result.unwrap_err() {
-        HubError::AccessDenied { app, instance } => {
-            assert_eq!(app, "kosha");
-            assert_eq!(instance, "root");
+        HubError::Unauthorized => {
+            // Expected - the sender is not in spokes.txt or .hubs files
         }
-        other => panic!("Expected AccessDenied error, got: {:?}", other),
+        other => panic!("Expected Unauthorized error, got: {:?}", other),
     }
 
     // Cleanup

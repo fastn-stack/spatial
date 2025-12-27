@@ -89,24 +89,23 @@ pub struct Spoke {
 }
 
 impl Spoke {
-    /// Get the SPOKE_HOME directory
-    pub fn home_dir() -> PathBuf {
-        if let Ok(home) = std::env::var("SPOKE_HOME") {
-            PathBuf::from(home)
-        } else {
-            directories::ProjectDirs::from("com", "fastn", "fastn-spoke")
-                .map(|p| p.data_dir().to_path_buf())
-                .unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .unwrap_or_else(|| PathBuf::from("."))
-                        .join(".fastn-spoke")
-                })
-        }
+    /// Get the default home directory (platform-specific)
+    ///
+    /// This returns the platform default, NOT reading from SPOKE_HOME env var.
+    /// The env var should be read in main.rs and passed to init/load.
+    pub fn default_home() -> PathBuf {
+        directories::ProjectDirs::from("com", "fastn", "fastn-spoke")
+            .map(|p| p.data_dir().to_path_buf())
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".fastn-spoke")
+            })
     }
 
-    /// Check if spoke is initialized
-    pub fn is_initialized() -> bool {
-        Self::home_dir().join("spoke.key").exists()
+    /// Check if spoke is initialized at a specific path
+    pub fn is_initialized(home: &std::path::Path) -> bool {
+        home.join("spoke.key").exists()
     }
 
     /// Get the spoke's ID52
@@ -134,15 +133,13 @@ impl Spoke {
         &self.secret_key
     }
 
-    /// Initialize a new spoke with a hub ID52, hub URL, and alias
+    /// Initialize a new spoke at the specified path
     ///
-    /// Creates SPOKE_HOME directory, generates a new secret key,
+    /// Creates the home directory, generates a new secret key,
     /// and saves the configuration with the hub ID52, hub URL, and alias.
-    pub async fn init(hub_id52: &str, hub_url: &str, alias: &str) -> Result<Self> {
-        let home = Self::home_dir();
-
+    pub async fn init(home: PathBuf, hub_id52: &str, hub_url: &str, alias: &str) -> Result<Self> {
         // Check if already initialized
-        if Self::is_initialized() {
+        if Self::is_initialized(&home) {
             return Err(Error::AlreadyInitialized(home));
         }
 
@@ -189,16 +186,14 @@ impl Spoke {
         })
     }
 
-    /// Load an existing spoke
-    ///
-    /// Loads the secret key and configuration from SPOKE_HOME.
-    pub async fn load() -> Result<Self> {
-        let home = Self::home_dir();
-
+    /// Load an existing spoke from the specified path
+    pub async fn load(home: &std::path::Path) -> Result<Self> {
         // Check if initialized
-        if !Self::is_initialized() {
+        if !Self::is_initialized(home) {
             return Err(Error::NotInitialized);
         }
+
+        let home = home.to_path_buf();
 
         // Load secret key
         let key_path = home.join("spoke.key");
@@ -233,12 +228,12 @@ impl Spoke {
         })
     }
 
-    /// Load or initialize spoke
-    pub async fn load_or_init(hub_id52: &str, hub_url: &str, alias: &str) -> Result<Self> {
-        if Self::is_initialized() {
-            Self::load().await
+    /// Load or initialize spoke at the specified path
+    pub async fn load_or_init(home: PathBuf, hub_id52: &str, hub_url: &str, alias: &str) -> Result<Self> {
+        if Self::is_initialized(&home) {
+            Self::load(&home).await
         } else {
-            Self::init(hub_id52, hub_url, alias).await
+            Self::init(home, hub_id52, hub_url, alias).await
         }
     }
 
@@ -278,7 +273,6 @@ impl Spoke {
         );
         HubConnection {
             hub_id52: self.config.hub_id52.clone(),
-            alias: self.config.alias.clone(),
             client,
         }
     }
@@ -297,8 +291,6 @@ impl Spoke {
 pub struct HubConnection {
     /// The hub's ID52
     hub_id52: String,
-    /// The spoke's alias (sent with requests)
-    alias: String,
     /// The underlying HTTP client
     client: fastn_net::client::Client,
 }
@@ -326,10 +318,11 @@ impl HubConnection {
         command: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        // Build the hub request with alias, from_hub, and target hub
+        // Build the hub request
+        // Note: The spoke's identity is derived from the cryptographic signature,
+        // not from fields in the request. This provides security - the hub
+        // verifies who the sender is, rather than trusting a claim.
         let request = fastn_hub::Request {
-            alias: Some(self.alias.clone()),
-            from_hub: self.hub_id52.clone(),
             target_hub: target_hub.to_string(),
             app: app.to_string(),
             instance: instance.to_string(),

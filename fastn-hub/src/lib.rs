@@ -56,6 +56,32 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Identity of a request sender, determined from signature verification
+#[derive(Debug, Clone)]
+pub enum SenderIdentity {
+    /// Sender is one of our authorized spokes
+    OwnSpoke { spoke_id52: String },
+    /// Sender is a remote hub forwarding a request
+    RemoteHub { hub_id52: String, alias: String },
+}
+
+impl SenderIdentity {
+    /// Check if the sender is one of our own spokes (owner request)
+    pub fn is_owner(&self) -> bool {
+        matches!(self, SenderIdentity::OwnSpoke { .. })
+    }
+
+    /// Get the hub ID for ACL purposes
+    /// For own spokes, this returns None (owner has full access)
+    /// For remote hubs, this returns the hub's ID52
+    pub fn requester_hub_id(&self) -> Option<&str> {
+        match self {
+            SenderIdentity::OwnSpoke { .. } => None,
+            SenderIdentity::RemoteHub { hub_id52, .. } => Some(hub_id52),
+        }
+    }
+}
+
 /// Hub configuration stored in config.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubConfig {
@@ -469,24 +495,23 @@ pub struct Hub {
 }
 
 impl Hub {
-    /// Get the FASTN_HOME directory
-    pub fn home_dir() -> PathBuf {
-        if let Ok(home) = std::env::var("FASTN_HOME") {
-            PathBuf::from(home)
-        } else {
-            directories::ProjectDirs::from("com", "fastn", "fastn")
-                .map(|p| p.data_dir().to_path_buf())
-                .unwrap_or_else(|| {
-                    dirs::home_dir()
-                        .unwrap_or_else(|| PathBuf::from("."))
-                        .join(".fastn")
-                })
-        }
+    /// Get the default home directory (platform-specific)
+    ///
+    /// This returns the platform default, NOT reading from FASTN_HOME env var.
+    /// The env var should be read in main.rs and passed to init/load.
+    pub fn default_home() -> PathBuf {
+        directories::ProjectDirs::from("com", "fastn", "fastn")
+            .map(|p| p.data_dir().to_path_buf())
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".fastn")
+            })
     }
 
-    /// Check if hub is initialized
-    pub fn is_initialized() -> bool {
-        Self::home_dir().join("hub.key").exists()
+    /// Check if hub is initialized at a specific path
+    pub fn is_initialized(home: &std::path::Path) -> bool {
+        home.join("hub.key").exists()
     }
 
     /// Get the hub's ID52
@@ -499,15 +524,13 @@ impl Hub {
         &self.home
     }
 
-    /// Initialize a new hub
+    /// Initialize a new hub at the specified path
     ///
-    /// Creates FASTN_HOME directory, generates a new secret key,
+    /// Creates the home directory, generates a new secret key,
     /// creates root kosha, and writes empty spokes.txt.
-    pub async fn init() -> Result<Self> {
-        let home = Self::home_dir();
-
+    pub async fn init(home: PathBuf) -> Result<Self> {
         // Check if already initialized
-        if Self::is_initialized() {
+        if Self::is_initialized(&home) {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 format!("Hub already initialized at {:?}", home),
@@ -601,16 +624,16 @@ impl Hub {
         })
     }
 
-    /// Load an existing hub
+    /// Load an existing hub from the specified path
     ///
-    /// Loads the secret key, configuration, and root kosha from FASTN_HOME.
-    pub async fn load() -> Result<Self> {
-        let home = Self::home_dir();
-
+    /// Loads the secret key, configuration, and root kosha from the specified home.
+    pub async fn load(home: &std::path::Path) -> Result<Self> {
         // Check if initialized
-        if !Self::is_initialized() {
+        if !Self::is_initialized(home) {
             return Err(Error::NotInitialized);
         }
+
+        let home = home.to_path_buf();
 
         // Load secret key
         let key_path = home.join("hub.key");
@@ -658,12 +681,12 @@ impl Hub {
         })
     }
 
-    /// Load or initialize hub
-    pub async fn load_or_init() -> Result<Self> {
-        if Self::is_initialized() {
-            Self::load().await
+    /// Load or initialize hub at the specified path
+    pub async fn load_or_init(home: PathBuf) -> Result<Self> {
+        if Self::is_initialized(&home) {
+            Self::load(&home).await
         } else {
-            Self::init().await
+            Self::init(home).await
         }
     }
 
@@ -811,30 +834,65 @@ impl Hub {
             .unwrap_or(false)
     }
 
-    /// Handle a request from a spoke
+    /// Determine the requester identity from the sender's ID52
+    ///
+    /// Returns the hub ID that the sender belongs to:
+    /// - If sender is in our spokes.txt → they're our spoke → return our hub ID
+    /// - If sender is in our .hubs files → they're another hub → return their ID
+    /// - Otherwise → unauthorized
+    pub async fn identify_sender(&self, sender_id52: &str) -> Result<SenderIdentity> {
+        // Check if sender is one of our authorized spokes
+        if self.spokes.is_authorized(sender_id52) {
+            return Ok(SenderIdentity::OwnSpoke {
+                spoke_id52: sender_id52.to_string(),
+            });
+        }
+
+        // Check if sender is an authorized hub (for cross-hub forwarding)
+        let resolver = HubAuthResolver::for_root(&self.root_kosha);
+        if let Some(hub_auth) = resolver.is_authorized(sender_id52).await? {
+            return Ok(SenderIdentity::RemoteHub {
+                hub_id52: sender_id52.to_string(),
+                alias: hub_auth.alias,
+            });
+        }
+
+        // Unknown sender
+        Err(Error::Unauthorized(sender_id52.to_string()))
+    }
+
+    /// Handle a request from a spoke or another hub
     ///
     /// Routes based on hardcoded app names:
     /// - "kosha": routes to registered koshas
     ///
-    /// The `requester_hub_id` is the hub ID of the spoke making the request.
-    /// Each user has their own hub, so requester_hub_id == self.id52() means
-    /// the request is from the hub owner.
+    /// The `sender_id52` is the cryptographic identity of the request signer.
+    /// The hub determines the requester identity:
+    /// - If sender is in spokes.txt → request from owner
+    /// - If sender is in .hubs files → cross-hub forwarded request
     ///
     /// Request routing:
     /// - `target_hub == "self"`: Handle locally, ACL skipped for owner
     /// - `target_hub != "self"`: Forward to target hub via its URL
-    ///
-    /// ACL for cross-hub requests (when this hub receives a forwarded request):
-    /// - Check if requester's hub ID is in our .hubs files
-    /// - If authorized, process the request
     pub async fn handle_request(
         &self,
-        spoke_id52: &str,
-        requester_hub_id: &str,
+        sender_id52: &str,
         request: Request,
     ) -> std::result::Result<Response, HubError> {
+        // Identify the sender from their cryptographic identity
+        // This replaces the old "trust the from_hub field" approach
+        let sender_identity = self.identify_sender(sender_id52).await
+            .map_err(|_| HubError::Unauthorized)?;
+
         // Check if this is a cross-hub forwarding request
         if request.target_hub != "self" {
+            // Only our own spokes can request forwarding
+            if !sender_identity.is_owner() {
+                return Err(HubError::AppError {
+                    message: "Only local spokes can request cross-hub forwarding".to_string(),
+                });
+            }
+
             // Look up the target hub by alias
             let target_hub = self.lookup_hub_by_alias(&request.target_hub).await
                 .map_err(|e| HubError::AppError {
@@ -845,29 +903,21 @@ impl Hub {
                 })?;
 
             // Forward the request to the target hub
-            return self.forward_request(&target_hub, requester_hub_id, request).await;
+            return self.forward_request(&target_hub, request).await;
         }
 
-        // Local request - check if it's from the hub owner or a remote hub
-        let is_owner = requester_hub_id == self.config.hub_id52;
-
-        if is_owner {
-            // Owner has full access to their own hub - skip ACL
-        } else {
-            // Cross-hub access: check if requester's hub is authorized via .hubs files
-            let is_authorized = self.is_hub_authorized(requester_hub_id).await
-                .map_err(|e| HubError::AppError {
-                    message: format!("ACL check failed: {}", e),
-                })?;
-
-            if !is_authorized {
-                return Err(HubError::AccessDenied {
-                    app: request.app.clone(),
-                    instance: request.instance.clone(),
-                });
+        // Local request - check authorization based on sender identity
+        match &sender_identity {
+            SenderIdentity::OwnSpoke { .. } => {
+                // Owner's spoke has full access to their own hub - skip ACL
             }
-            // Note: For now we use simple .hubs file authorization.
-            // Future: Check WASM-based ACL modules for fine-grained access control.
+            SenderIdentity::RemoteHub { hub_id52, .. } => {
+                // Cross-hub access: the sender is already verified as an authorized hub
+                // (identify_sender checked .hubs files), but we log for debugging
+                tracing::debug!("Cross-hub access from hub {}", hub_id52);
+                // Note: For now we use simple .hubs file authorization.
+                // Future: Check WASM-based ACL modules for fine-grained access control.
+            }
         }
 
         // Route based on hardcoded app name
@@ -921,10 +971,10 @@ impl Hub {
     /// Forward a request to a remote hub
     ///
     /// Used when `target_hub != "self"` to forward the request to another hub.
+    /// The remote hub will verify our signature and check if we're authorized.
     pub async fn forward_request(
         &self,
         target_hub: &ResolvedHubAuth,
-        requester_hub_id: &str,
         mut request: Request,
     ) -> std::result::Result<Response, HubError> {
         let url = target_hub.url.as_ref().ok_or_else(|| {
@@ -934,6 +984,8 @@ impl Hub {
         })?;
 
         // Create a client to forward the request
+        // The client signs the request with our hub's key, so the remote hub
+        // knows the request came from us (and can check if we're authorized)
         let client = fastn_net::client::Client::new(
             self.secret_key.clone(),
             target_hub.id52.clone(),
@@ -991,11 +1043,10 @@ impl Hub {
                         }
                     };
 
-                    // Use the from_hub field from the request - this is the hub that the spoke belongs to
-                    let requester_hub_id = request.from_hub.clone();
-
                     // Handle the request
-                    let result = hub.handle_request(&sender_id52, &requester_hub_id, request).await;
+                    // The sender identity is derived from the signature (sender_id52),
+                    // not from any untrusted field in the request
+                    let result = hub.handle_request(&sender_id52, request).await;
 
                     // Wrap in envelope and sign response
                     let envelope: ResponseEnvelope<Response, HubError> = match result {
@@ -1038,15 +1089,6 @@ impl Hub {
 /// Hub routes based on (app, instance) and does ACL check before forwarding
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
-    /// Spoke's alias (human-readable name)
-    /// Required on first connection, optional on subsequent connections.
-    /// The hub uses this to identify the spoke in pending connections.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
-    /// The hub ID52 that this spoke belongs to
-    /// Used for ACL checking - the hub uses this to determine if the requester
-    /// is an "owner" (same hub) or a "remote" spoke (different hub)
-    pub from_hub: String,
     /// Target hub alias: "self" for local hub, or alias of a remote hub
     /// If not specified, defaults to "self"
     #[serde(default = "default_target_hub")]
