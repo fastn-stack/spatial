@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>fastn app</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #1a1a2e;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            background: #16213e;
+        }
+        #error {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff6b6b;
+            font-family: monospace;
+            padding: 20px;
+            max-width: 600px;
+            text-align: center;
+            white-space: pre-wrap;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #888;
+            font-size: 14px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas" style="display: none;"></canvas>
+    <div id="error"></div>
+    <div id="loading">Loading app...</div>
+
+    <!-- Load shared modules first -->
+    <script src="shell-common.js"></script>
+    <script src="shell-webgpu.js"></script>
+
+    <!-- Tauri integration for loading from hub -->
+    <script>
+        // Tauri invoke wrapper (Tauri 2.0 uses __TAURI__.core.invoke)
+        // Access parent window's Tauri since we're in an iframe
+        async function invoke(cmd, args = {}) {
+            // Try parent window first (we're in an iframe)
+            if (window.parent && window.parent.__TAURI__ && window.parent.__TAURI__.core) {
+                return window.parent.__TAURI__.core.invoke(cmd, args);
+            }
+            // Fallback to own window
+            if (window.__TAURI__ && window.__TAURI__.core) {
+                return window.__TAURI__.core.invoke(cmd, args);
+            }
+            throw new Error('Tauri not available');
+        }
+
+        // Base64 to ArrayBuffer
+        function base64ToArrayBuffer(base64) {
+            const binaryString = atob(base64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        // Modified AssetManager that loads from hub via Tauri
+        class TauriAssetManager extends AssetManager {
+            constructor(kosha) {
+                super('./'); // basePath not used
+                this.kosha = kosha;
+            }
+
+            async load(assetId, path) {
+                if (this.meshes.has(assetId)) {
+                    console.log(`Asset ${assetId} already loaded, skipping`);
+                    return true;
+                }
+
+                console.log(`Loading asset ${assetId} from hub kosha: ${this.kosha}/${path}`);
+
+                try {
+                    // Fetch asset from hub kosha via Tauri command
+                    const base64Content = await invoke('fetch_kosha_file', { kosha: this.kosha, path });
+                    const arrayBuffer = base64ToArrayBuffer(base64Content);
+
+                    console.log(`Loaded asset: ${arrayBuffer.byteLength} bytes`);
+
+                    const mesh = this.parseGLB(arrayBuffer);
+                    this.meshes.set(assetId, mesh);
+                    console.log(`Loaded mesh: ${mesh.vertices.length / 3} vertices, ${mesh.indices.length} indices, color: [${mesh.color.join(', ')}]`);
+                    return true;
+                } catch (e) {
+                    console.error(`Failed to load asset ${assetId}: ${e.message || e}`);
+                    return false;
+                }
+            }
+        }
+
+        // Modified FastnCore that loads WASM from hub via Tauri
+        class TauriCore extends FastnCore {
+            async loadWasm(kosha, path) {
+                console.log(`Loading WASM from hub: ${kosha}/${path}`);
+
+                // Fetch WASM from hub kosha via Tauri command
+                const base64Content = await invoke('fetch_kosha_file', { kosha, path });
+                const wasmBytes = base64ToArrayBuffer(base64Content);
+
+                console.log(`Loaded WASM: ${wasmBytes.byteLength} bytes`);
+
+                const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+
+                console.log('WASM exports:', Object.keys(instance.exports));
+
+                this.wasm = instance.exports;
+                this.appPtr = this.wasm.init_core();
+                console.log(`App pointer: ${this.appPtr}`);
+
+                // Read initial commands
+                const resultPtr = this.wasm.get_result_ptr(this.appPtr);
+                const resultLen = this.wasm.get_result_len(this.appPtr);
+
+                if (resultLen === 0) {
+                    console.warn('Empty result from WASM');
+                    return [];
+                }
+
+                const jsonBytes = new Uint8Array(this.wasm.memory.buffer, resultPtr, resultLen);
+                const jsonStr = new TextDecoder().decode(jsonBytes);
+
+                console.log('WASM result:', jsonStr);
+                return JSON.parse(jsonStr);
+            }
+        }
+
+        // Modified WebGPU shell that uses TauriCore and TauriAssetManager
+        class TauriWebGPUShell extends WebGPUShell {
+            constructor(canvas, kosha) {
+                super(canvas);
+                // Replace core with TauriCore
+                this.core = new TauriCore();
+                // Replace asset manager with Tauri-aware one
+                this.sceneState.assetManager = new TauriAssetManager(kosha);
+                this.inputHandler = new InputHandler(this.core);
+                this.inputHandler.setCommandHandler((commands) => this.sceneState.processCommands(commands));
+            }
+
+            async loadWasmFromHub(kosha, path) {
+                const commands = await this.core.loadWasm(kosha, path);
+                this.sceneState.processCommands(commands);
+            }
+        }
+
+        // Main entry point
+        async function main() {
+            const loadingDiv = document.getElementById('loading');
+            const errorDiv = document.getElementById('error');
+            const canvas = document.getElementById('canvas');
+
+            try {
+                loadingDiv.textContent = 'Checking spoke configuration...';
+
+                // Get spoke info via Tauri
+                const spokeInfo = await invoke('get_spoke_info');
+                console.log('Spoke info:', spokeInfo);
+
+                if (!spokeInfo.initialized) {
+                    // This shouldn't happen in the iframe - parent should handle init
+                    loadingDiv.textContent = 'Waiting for spoke initialization...';
+                    return;
+                }
+
+                // Spoke is initialized, load the scene WASM from hub
+                loadingDiv.textContent = `Loading scene from hub (${spokeInfo.hub_url})...`;
+
+                const kosha = 'root';
+                const shell = new TauriWebGPUShell(canvas, kosha);
+                await shell.init();
+
+                // Load WASM from root kosha - scene.wasm is the default app
+                await shell.loadWasmFromHub(kosha, 'scene.wasm');
+
+                loadingDiv.style.display = 'none';
+                canvas.style.display = 'block';
+                shell.render();
+
+                console.log('fastn spoke app running');
+                console.log('Controls: WASD=move, IJKL=rotate, QE=up/down, 0=reset');
+
+            } catch (e) {
+                console.error('Error:', e);
+                loadingDiv.style.display = 'none';
+                errorDiv.textContent = e.message || String(e);
+            }
+        }
+
+        // Wait for Tauri to be ready (check both parent and self)
+        function checkTauriAndStart() {
+            const hasTauri = (window.parent && window.parent.__TAURI__ && window.parent.__TAURI__.core) ||
+                             (window.__TAURI__ && window.__TAURI__.core);
+            if (hasTauri) {
+                main();
+            } else {
+                document.getElementById('loading').style.display = 'none';
+                document.getElementById('error').textContent =
+                    'Tauri API not available. Make sure you are running this in a Tauri app.';
+            }
+        }
+
+        if ((window.parent && window.parent.__TAURI__) || window.__TAURI__) {
+            checkTauriAndStart();
+        } else {
+            window.addEventListener('DOMContentLoaded', () => {
+                // Give Tauri a moment to inject __TAURI__
+                setTimeout(checkTauriAndStart, 200);
+            });
+        }
+    </script>
+</body>
+</html>

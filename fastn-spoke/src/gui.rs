@@ -59,6 +59,39 @@ pub async fn get_spoke_info(state: tauri::State<'_, Arc<AppState>>) -> Result<Sp
     })
 }
 
+/// Initialize a new spoke with hub connection details
+#[tauri::command]
+pub async fn init_spoke(
+    state: tauri::State<'_, Arc<AppState>>,
+    hub_id52: String,
+    hub_url: String,
+    alias: String,
+) -> Result<SpokeInfo, String> {
+    let mut spoke_guard = state.spoke.lock().await;
+
+    // Check if already initialized
+    if spoke_guard.is_some() {
+        return Err("Spoke is already initialized".to_string());
+    }
+
+    // Initialize the spoke
+    let spoke = crate::Spoke::init(state.home.clone(), &hub_id52, &hub_url, &alias)
+        .await
+        .map_err(|e| format!("Failed to initialize spoke: {}", e))?;
+
+    let info = SpokeInfo {
+        spoke_id52: spoke.id52().to_string(),
+        hub_id52: spoke.hub_id52().to_string(),
+        hub_url: spoke.hub_url().to_string(),
+        alias: spoke.alias().to_string(),
+        initialized: true,
+    };
+
+    *spoke_guard = Some(spoke);
+
+    Ok(info)
+}
+
 /// Fetch a file from the hub kosha and return as base64
 /// The frontend will decode this to get the raw WASM bytes
 #[tauri::command]
@@ -101,6 +134,7 @@ pub fn run(home: PathBuf) {
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             get_spoke_info,
+            init_spoke,
             fetch_kosha_file,
         ])
         .run(tauri::generate_context!())

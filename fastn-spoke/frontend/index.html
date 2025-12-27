@@ -2,7 +2,7 @@
 <html>
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>fastn spoke</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -13,25 +13,164 @@
             background: #1a1a2e;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
-        canvas {
-            display: block;
+
+        /* Status bar - always visible */
+        #status-bar {
+            height: 32px;
+            background: #0f0f1a;
+            border-bottom: 1px solid #2a2a4a;
+            display: flex;
+            align-items: center;
+            padding: 0 12px;
+            font-size: 12px;
+            color: #888;
+            gap: 16px;
+        }
+        #status-bar .status-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        #status-bar .status-label {
+            color: #666;
+        }
+        #status-bar .status-value {
+            color: #aaa;
+            font-family: monospace;
+            font-size: 11px;
+        }
+        #status-bar .status-value.connected {
+            color: #4ade80;
+        }
+        #status-bar .status-value.disconnected {
+            color: #f87171;
+        }
+        #status-bar .spacer {
+            flex: 1;
+        }
+        #status-bar button {
+            background: transparent;
+            border: 1px solid #444;
+            color: #888;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        #status-bar button:hover {
+            background: #2a2a4a;
+            color: #fff;
+        }
+
+        /* Main content area */
+        #main-content {
+            height: calc(100% - 32px);
+            width: 100%;
+            position: relative;
+        }
+
+        /* App iframe - full content area */
+        #app-frame {
             width: 100%;
             height: 100%;
-            background: #16213e;
+            border: none;
+            display: none;
         }
-        #error {
+
+        /* Init form */
+        #init-form {
+            display: none;
             position: absolute;
             top: 50%;
             left: 50%;
             transform: translate(-50%, -50%);
-            color: #ff6b6b;
-            font-family: monospace;
-            padding: 20px;
-            max-width: 600px;
-            text-align: center;
-            white-space: pre-wrap;
+            background: #1e1e3a;
+            border: 1px solid #3a3a6a;
+            border-radius: 8px;
+            padding: 24px;
+            width: 400px;
+            max-width: 90%;
         }
+        #init-form h2 {
+            color: #fff;
+            font-size: 18px;
+            margin-bottom: 16px;
+        }
+        #init-form .form-group {
+            margin-bottom: 16px;
+        }
+        #init-form label {
+            display: block;
+            color: #aaa;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+        #init-form input {
+            width: 100%;
+            padding: 8px 12px;
+            background: #0f0f1a;
+            border: 1px solid #3a3a6a;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 14px;
+            font-family: monospace;
+        }
+        #init-form input:focus {
+            outline: none;
+            border-color: #6366f1;
+        }
+        #init-form input::placeholder {
+            color: #555;
+        }
+        #init-form .hint {
+            color: #666;
+            font-size: 11px;
+            margin-top: 4px;
+        }
+        #init-form button[type="submit"] {
+            width: 100%;
+            padding: 10px;
+            background: #6366f1;
+            border: none;
+            border-radius: 4px;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            margin-top: 8px;
+        }
+        #init-form button[type="submit"]:hover {
+            background: #4f46e5;
+        }
+        #init-form button[type="submit"]:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+        #init-form .error {
+            color: #f87171;
+            font-size: 12px;
+            margin-top: 8px;
+        }
+        #init-form .spoke-id-display {
+            background: #0a0a15;
+            border: 1px solid #2a2a4a;
+            border-radius: 4px;
+            padding: 8px 12px;
+            margin-top: 16px;
+        }
+        #init-form .spoke-id-label {
+            color: #666;
+            font-size: 11px;
+        }
+        #init-form .spoke-id-value {
+            color: #4ade80;
+            font-family: monospace;
+            font-size: 12px;
+            word-break: break-all;
+        }
+
+        /* Loading state */
         #loading {
+            display: none;
             position: absolute;
             top: 50%;
             left: 50%;
@@ -40,20 +179,77 @@
             font-size: 14px;
             text-align: center;
         }
+
+        /* Error state */
+        #error {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #f87171;
+            font-family: monospace;
+            padding: 20px;
+            max-width: 600px;
+            text-align: center;
+            white-space: pre-wrap;
+        }
     </style>
 </head>
 <body>
-    <canvas id="canvas" style="display: none;"></canvas>
-    <div id="error"></div>
-    <div id="loading">Loading spoke...</div>
+    <!-- Status bar -->
+    <div id="status-bar">
+        <div class="status-item">
+            <span class="status-label">Status:</span>
+            <span id="connection-status" class="status-value disconnected">Not initialized</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Hub:</span>
+            <span id="hub-id-display" class="status-value">-</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Spoke:</span>
+            <span id="spoke-id-display" class="status-value">-</span>
+        </div>
+        <div class="spacer"></div>
+        <button id="settings-btn" title="Settings">Settings</button>
+    </div>
 
-    <!-- Load shared modules first -->
-    <script src="shell-common.js"></script>
-    <script src="shell-webgpu.js"></script>
+    <!-- Main content -->
+    <div id="main-content">
+        <iframe id="app-frame" src="app.html"></iframe>
+        <div id="init-form">
+            <h2>Initialize Spoke</h2>
+            <form id="init-spoke-form">
+                <div class="form-group">
+                    <label for="hub-url">Hub URL</label>
+                    <input type="text" id="hub-url" name="hub_url" placeholder="http://localhost:3000" required>
+                    <div class="hint">The HTTP URL of your hub server</div>
+                </div>
+                <div class="form-group">
+                    <label for="hub-id52">Hub ID52</label>
+                    <input type="text" id="hub-id52" name="hub_id52" placeholder="abc123..." required>
+                    <div class="hint">The 52-character hub identifier (from hub server output)</div>
+                </div>
+                <div class="form-group">
+                    <label for="alias">Alias</label>
+                    <input type="text" id="alias" name="alias" placeholder="my-hub" required>
+                    <div class="hint">A friendly name for this hub connection</div>
+                </div>
+                <button type="submit" id="init-btn">Initialize Spoke</button>
+                <div id="init-error" class="error"></div>
+            </form>
+            <div id="spoke-id-result" class="spoke-id-display" style="display: none;">
+                <div class="spoke-id-label">Your Spoke ID (add this to hub's spokes.txt):</div>
+                <div id="new-spoke-id" class="spoke-id-value"></div>
+            </div>
+        </div>
+        <div id="loading">Loading...</div>
+        <div id="error"></div>
+    </div>
 
-    <!-- Tauri integration -->
     <script>
-        // Tauri invoke wrapper (Tauri 2.0 uses __TAURI__.core.invoke)
+        // Tauri invoke wrapper
         async function invoke(cmd, args = {}) {
             if (window.__TAURI__ && window.__TAURI__.core) {
                 return window.__TAURI__.core.invoke(cmd, args);
@@ -61,147 +257,135 @@
             throw new Error('Tauri not available');
         }
 
-        // Base64 to ArrayBuffer
-        function base64ToArrayBuffer(base64) {
-            const binaryString = atob(base64);
-            const bytes = new Uint8Array(binaryString.length);
-            for (let i = 0; i < binaryString.length; i++) {
-                bytes[i] = binaryString.charCodeAt(i);
-            }
-            return bytes.buffer;
+        // UI elements
+        const statusBar = document.getElementById('status-bar');
+        const connectionStatus = document.getElementById('connection-status');
+        const hubIdDisplay = document.getElementById('hub-id-display');
+        const spokeIdDisplay = document.getElementById('spoke-id-display');
+        const settingsBtn = document.getElementById('settings-btn');
+        const appFrame = document.getElementById('app-frame');
+        const initFormDiv = document.getElementById('init-form');
+        const initForm = document.getElementById('init-spoke-form');
+        const initBtn = document.getElementById('init-btn');
+        const initError = document.getElementById('init-error');
+        const spokeIdResult = document.getElementById('spoke-id-result');
+        const newSpokeId = document.getElementById('new-spoke-id');
+        const loadingDiv = document.getElementById('loading');
+        const errorDiv = document.getElementById('error');
+
+        // Truncate ID for display
+        function truncateId(id, len = 8) {
+            if (!id || id.length <= len * 2) return id;
+            return id.substring(0, len) + '...' + id.substring(id.length - len);
         }
 
-        // Modified AssetManager that loads from hub via Tauri
-        class TauriAssetManager extends AssetManager {
-            constructor(kosha) {
-                super('./'); // basePath not used
-                this.kosha = kosha;
-            }
-
-            async load(assetId, path) {
-                if (this.meshes.has(assetId)) {
-                    console.log(`Asset ${assetId} already loaded, skipping`);
-                    return true;
-                }
-
-                console.log(`Loading asset ${assetId} from hub kosha: ${this.kosha}/${path}`);
-
-                try {
-                    // Fetch asset from hub kosha via Tauri command
-                    const base64Content = await invoke('fetch_kosha_file', { kosha: this.kosha, path });
-                    const arrayBuffer = base64ToArrayBuffer(base64Content);
-
-                    console.log(`Loaded asset: ${arrayBuffer.byteLength} bytes`);
-
-                    const mesh = this.parseGLB(arrayBuffer);
-                    this.meshes.set(assetId, mesh);
-                    console.log(`Loaded mesh: ${mesh.vertices.length / 3} vertices, ${mesh.indices.length} indices, color: [${mesh.color.join(', ')}]`);
-                    return true;
-                } catch (e) {
-                    console.error(`Failed to load asset ${assetId}: ${e.message || e}`);
-                    return false;
-                }
-            }
+        // Show the initialization form
+        function showInitForm() {
+            initFormDiv.style.display = 'block';
+            appFrame.style.display = 'none';
+            loadingDiv.style.display = 'none';
+            errorDiv.style.display = 'none';
+            connectionStatus.textContent = 'Not initialized';
+            connectionStatus.classList.remove('connected');
+            connectionStatus.classList.add('disconnected');
         }
 
-        // Modified FastnCore that loads WASM from hub via Tauri
-        class TauriCore extends FastnCore {
-            async loadWasm(kosha, path) {
-                console.log(`Loading WASM from hub: ${kosha}/${path}`);
+        // Show the app
+        function showApp(spokeInfo) {
+            initFormDiv.style.display = 'none';
+            appFrame.style.display = 'block';
+            loadingDiv.style.display = 'none';
+            errorDiv.style.display = 'none';
 
-                // Fetch WASM from hub kosha via Tauri command
-                const base64Content = await invoke('fetch_kosha_file', { kosha, path });
-                const wasmBytes = base64ToArrayBuffer(base64Content);
-
-                console.log(`Loaded WASM: ${wasmBytes.byteLength} bytes`);
-
-                const { instance } = await WebAssembly.instantiate(wasmBytes, {});
-
-                console.log('WASM exports:', Object.keys(instance.exports));
-
-                this.wasm = instance.exports;
-                this.appPtr = this.wasm.init_core();
-                console.log(`App pointer: ${this.appPtr}`);
-
-                // Read initial commands
-                const resultPtr = this.wasm.get_result_ptr(this.appPtr);
-                const resultLen = this.wasm.get_result_len(this.appPtr);
-
-                if (resultLen === 0) {
-                    console.warn('Empty result from WASM');
-                    return [];
-                }
-
-                const jsonBytes = new Uint8Array(this.wasm.memory.buffer, resultPtr, resultLen);
-                const jsonStr = new TextDecoder().decode(jsonBytes);
-
-                console.log('WASM result:', jsonStr);
-                return JSON.parse(jsonStr);
-            }
+            connectionStatus.textContent = 'Connected';
+            connectionStatus.classList.remove('disconnected');
+            connectionStatus.classList.add('connected');
+            hubIdDisplay.textContent = truncateId(spokeInfo.hub_id52);
+            hubIdDisplay.title = spokeInfo.hub_id52;
+            spokeIdDisplay.textContent = truncateId(spokeInfo.spoke_id52);
+            spokeIdDisplay.title = spokeInfo.spoke_id52;
         }
 
-        // Modified WebGPU shell that uses TauriCore and TauriAssetManager
-        class TauriWebGPUShell extends WebGPUShell {
-            constructor(canvas, kosha) {
-                super(canvas);
-                // Replace core with TauriCore
-                this.core = new TauriCore();
-                // Replace asset manager with Tauri-aware one
-                this.sceneState.assetManager = new TauriAssetManager(kosha);
-                this.inputHandler = new InputHandler(this.core);
-                this.inputHandler.setCommandHandler((commands) => this.sceneState.processCommands(commands));
-            }
-
-            async loadWasmFromHub(kosha, path) {
-                const commands = await this.core.loadWasm(kosha, path);
-                this.sceneState.processCommands(commands);
-            }
+        // Show loading state
+        function showLoading(message) {
+            loadingDiv.textContent = message;
+            loadingDiv.style.display = 'block';
+            initFormDiv.style.display = 'none';
+            appFrame.style.display = 'none';
+            errorDiv.style.display = 'none';
         }
+
+        // Show error state
+        function showError(message) {
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+            loadingDiv.style.display = 'none';
+            initFormDiv.style.display = 'none';
+            appFrame.style.display = 'none';
+        }
+
+        // Handle init form submission
+        initForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            initBtn.disabled = true;
+            initBtn.textContent = 'Initializing...';
+            initError.textContent = '';
+
+            const hubUrl = document.getElementById('hub-url').value.trim();
+            const hubId52 = document.getElementById('hub-id52').value.trim();
+            const alias = document.getElementById('alias').value.trim();
+
+            try {
+                const result = await invoke('init_spoke', {
+                    hubUrl,
+                    hubId52,
+                    alias
+                });
+
+                console.log('Spoke initialized:', result);
+
+                // Show the spoke ID so user can add it to hub
+                newSpokeId.textContent = result.spoke_id52;
+                spokeIdResult.style.display = 'block';
+
+                // Wait a moment, then show the app
+                setTimeout(() => {
+                    showApp(result);
+                }, 2000);
+
+            } catch (err) {
+                console.error('Init error:', err);
+                initError.textContent = err.message || String(err);
+            } finally {
+                initBtn.disabled = false;
+                initBtn.textContent = 'Initialize Spoke';
+            }
+        });
+
+        // Settings button - show init form for reconfiguration (future)
+        settingsBtn.addEventListener('click', () => {
+            // For now just show info, in future could allow reconfiguration
+            alert('Settings coming soon. Spoke info displayed in status bar.');
+        });
 
         // Main entry point
         async function main() {
-            const loadingDiv = document.getElementById('loading');
-            const errorDiv = document.getElementById('error');
-            const canvas = document.getElementById('canvas');
-
             try {
-                loadingDiv.textContent = 'Checking spoke configuration...';
+                showLoading('Checking spoke configuration...');
 
                 // Get spoke info via Tauri
                 const spokeInfo = await invoke('get_spoke_info');
                 console.log('Spoke info:', spokeInfo);
 
                 if (!spokeInfo.initialized) {
-                    throw new Error(
-                        'Spoke not initialized.\n\n' +
-                        'Please initialize via CLI first:\n\n' +
-                        '  fastn-spoke init <hub-id52> <hub-url> <alias>\n\n' +
-                        'Then add spoke to hub:\n\n' +
-                        '  fastn-hub add-spoke <spoke-id52>'
-                    );
+                    showInitForm();
+                } else {
+                    showApp(spokeInfo);
                 }
-
-                // Spoke is initialized, load the scene WASM from hub
-                loadingDiv.textContent = `Loading scene from hub (${spokeInfo.hub_url})...`;
-
-                const kosha = 'root';
-                const shell = new TauriWebGPUShell(canvas, kosha);
-                await shell.init();
-
-                // Load WASM from root kosha - scene.wasm is the default app
-                await shell.loadWasmFromHub(kosha, 'scene.wasm');
-
-                loadingDiv.style.display = 'none';
-                canvas.style.display = 'block';
-                shell.render();
-
-                console.log('fastn spoke GUI running');
-                console.log('Controls: WASD=move, IJKL=rotate, QE=up/down, 0=reset');
 
             } catch (e) {
                 console.error('Error:', e);
-                loadingDiv.style.display = 'none';
-                errorDiv.textContent = e.message || String(e);
+                showError(e.message || String(e));
             }
         }
 
@@ -210,14 +394,11 @@
             main();
         } else {
             window.addEventListener('DOMContentLoaded', () => {
-                // Give Tauri a moment to inject __TAURI__
                 setTimeout(() => {
                     if (window.__TAURI__ && window.__TAURI__.core) {
                         main();
                     } else {
-                        document.getElementById('loading').style.display = 'none';
-                        document.getElementById('error').textContent =
-                            'Tauri API not available. Make sure you are running this in a Tauri app.';
+                        showError('Tauri API not available. Make sure you are running this in a Tauri app.');
                     }
                 }, 200);
             });
