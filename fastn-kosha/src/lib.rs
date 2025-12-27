@@ -255,8 +255,41 @@ impl Kosha {
     }
 
     /// List directory contents
-    pub async fn list_dir(&self, _path: &str) -> Result<Vec<DirEntry>> {
-        todo!("list_dir")
+    pub async fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
+        let full_path = self.path.join("files").join(path);
+
+        // If path doesn't exist or isn't a directory, return empty list
+        if !full_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let metadata = tokio::fs::metadata(&full_path).await?;
+        if !metadata.is_dir() {
+            return Err(Error::InvalidPath(format!("{} is not a directory", path)));
+        }
+
+        let mut entries = Vec::new();
+        let mut dir = tokio::fs::read_dir(&full_path).await?;
+
+        while let Some(entry) = dir.next_entry().await? {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let metadata = entry.metadata().await?;
+            let modified = metadata.modified()
+                .map(|t| DateTime::<Utc>::from(t))
+                .unwrap_or_else(|_| Utc::now());
+
+            entries.push(DirEntry {
+                name,
+                is_dir: metadata.is_dir(),
+                size: metadata.len(),
+                modified,
+            });
+        }
+
+        // Sort by name for consistent ordering
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+        Ok(entries)
     }
 
     /// Get all versions of a file

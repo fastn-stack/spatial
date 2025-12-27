@@ -326,9 +326,10 @@ impl HubConnection {
         command: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        // Build the hub request with alias and target hub
+        // Build the hub request with alias, from_hub, and target hub
         let request = fastn_hub::Request {
             alias: Some(self.alias.clone()),
+            from_hub: self.hub_id52.clone(),
             target_hub: target_hub.to_string(),
             app: app.to_string(),
             instance: instance.to_string(),

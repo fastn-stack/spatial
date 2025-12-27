@@ -162,8 +162,8 @@ impl SpokesConfig {
 /// An entry in a hub authorization file
 #[derive(Debug, Clone)]
 pub enum HubAuthEntry {
-    /// Direct hub authorization: <id52>: <alias>
-    Hub { id52: String, alias: String },
+    /// Direct hub authorization: <id52>: <alias> [<url>]
+    Hub { id52: String, alias: String, url: Option<String> },
     /// Include another file: @<filename> (relative to current kosha)
     Include(String),
     /// Include from root kosha: @ROOT/<alias>
@@ -218,13 +218,20 @@ impl HubAuthFile {
                     return Some(HubAuthEntry::Include(include.to_string()));
                 }
 
-                // Parse id52: alias format
+                // Parse id52: alias [url] format
                 let parts: Vec<&str> = line.splitn(2, ':').collect();
                 if parts.len() == 2 {
-                    Some(HubAuthEntry::Hub {
-                        id52: parts[0].trim().to_string(),
-                        alias: parts[1].trim().to_string(),
-                    })
+                    let id52 = parts[0].trim().to_string();
+                    let rest = parts[1].trim();
+                    // Split by whitespace to get alias and optional URL
+                    let mut tokens = rest.split_whitespace();
+                    let alias = tokens.next().unwrap_or("").to_string();
+                    let url = tokens.next().map(|s| s.to_string());
+                    if alias.is_empty() {
+                        None
+                    } else {
+                        Some(HubAuthEntry::Hub { id52, alias, url })
+                    }
                 } else {
                     None
                 }
@@ -238,7 +245,13 @@ impl HubAuthFile {
         self.entries
             .iter()
             .map(|e| match e {
-                HubAuthEntry::Hub { id52, alias } => format!("{}: {}", id52, alias),
+                HubAuthEntry::Hub { id52, alias, url } => {
+                    if let Some(u) = url {
+                        format!("{}: {} {}", id52, alias, u)
+                    } else {
+                        format!("{}: {}", id52, alias)
+                    }
+                }
                 HubAuthEntry::Include(name) => format!("@{}", name),
                 HubAuthEntry::IncludeRoot(name) => format!("@ROOT/{}", name),
                 HubAuthEntry::AliasRef(alias) => format!("#{}", alias),
@@ -255,6 +268,8 @@ pub struct ResolvedHubAuth {
     pub id52: String,
     /// The alias to use for this hub
     pub alias: String,
+    /// The hub's URL (for forwarding requests)
+    pub url: Option<String>,
     /// The file path where this hub was defined (for debugging)
     pub source_file: String,
 }
@@ -340,12 +355,13 @@ impl<'a> HubAuthResolver<'a> {
 
             for entry in file.entries {
                 match entry {
-                    HubAuthEntry::Hub { id52, alias } => {
+                    HubAuthEntry::Hub { id52, alias, url } => {
                         // Use override alias if provided, otherwise use the original alias
                         let final_alias = override_alias.unwrap_or(&alias);
                         results.push(ResolvedHubAuth {
                             id52,
                             alias: final_alias.to_string(),
+                            url,
                             source_file: path.clone(),
                         });
                     }
@@ -374,6 +390,7 @@ impl<'a> HubAuthResolver<'a> {
                         results.push(ResolvedHubAuth {
                             id52: format!("@alias:{}", alias), // Placeholder for alias lookup
                             alias: override_alias.unwrap_or(&alias).to_string(),
+                            url: None,
                             source_file: path.clone(),
                         });
                     }
@@ -803,49 +820,54 @@ impl Hub {
     /// Each user has their own hub, so requester_hub_id == self.id52() means
     /// the request is from the hub owner.
     ///
-    /// When `target_hub` is "self", ACL checks are skipped - the spoke has full
-    /// access to its own hub's resources.
+    /// Request routing:
+    /// - `target_hub == "self"`: Handle locally, ACL skipped for owner
+    /// - `target_hub != "self"`: Forward to target hub via its URL
+    ///
+    /// ACL for cross-hub requests (when this hub receives a forwarded request):
+    /// - Check if requester's hub ID is in our .hubs files
+    /// - If authorized, process the request
     pub async fn handle_request(
         &self,
         spoke_id52: &str,
         requester_hub_id: &str,
         request: Request,
     ) -> std::result::Result<Response, HubError> {
-        // For target_hub="self", skip ACL checks - spoke has full access to own hub
-        let skip_acl = request.target_hub == "self";
+        // Check if this is a cross-hub forwarding request
+        if request.target_hub != "self" {
+            // Look up the target hub by alias
+            let target_hub = self.lookup_hub_by_alias(&request.target_hub).await
+                .map_err(|e| HubError::AppError {
+                    message: format!("Failed to lookup hub '{}': {}", request.target_hub, e),
+                })?
+                .ok_or_else(|| HubError::AppError {
+                    message: format!("Unknown hub alias: '{}'. Add it to hubs/*.hubs", request.target_hub),
+                })?;
 
-        if !skip_acl {
-            // Extract path from payload for file operations (used in ACL checks)
-            let path = Self::extract_path_from_payload(&request.command, &request.payload);
+            // Forward the request to the target hub
+            return self.forward_request(&target_hub, requester_hub_id, request).await;
+        }
 
-            // Build access context with hub IDs
-            let ctx = AccessContext {
-                requester_hub_id: requester_hub_id.to_string(),
-                current_hub_id: self.config.hub_id52.clone(),
-                spoke_id52: spoke_id52.to_string(),
-                app: request.app.clone(),
-                instance: request.instance.clone(),
-                command: request.command.clone(),
-                path,
-            };
+        // Local request - check if it's from the hub owner or a remote hub
+        let is_owner = requester_hub_id == self.config.hub_id52;
 
-            // Check ACL via WASM modules
-            match self.check_access(&ctx).await {
-                AccessResult::Allowed => {}
-                AccessResult::Denied(_reason) => {
-                    return Err(HubError::AccessDenied {
-                        app: request.app.clone(),
-                        instance: request.instance.clone(),
-                    });
-                }
-                AccessResult::NoModule => {
-                    // This shouldn't happen as check_access returns Denied if no module found
-                    return Err(HubError::AccessDenied {
-                        app: request.app.clone(),
-                        instance: request.instance.clone(),
-                    });
-                }
+        if is_owner {
+            // Owner has full access to their own hub - skip ACL
+        } else {
+            // Cross-hub access: check if requester's hub is authorized via .hubs files
+            let is_authorized = self.is_hub_authorized(requester_hub_id).await
+                .map_err(|e| HubError::AppError {
+                    message: format!("ACL check failed: {}", e),
+                })?;
+
+            if !is_authorized {
+                return Err(HubError::AccessDenied {
+                    app: request.app.clone(),
+                    instance: request.instance.clone(),
+                });
             }
+            // Note: For now we use simple .hubs file authorization.
+            // Future: Check WASM-based ACL modules for fine-grained access control.
         }
 
         // Route based on hardcoded app name
@@ -876,6 +898,58 @@ impl Hub {
     /// Get the secret key
     pub fn secret_key(&self) -> &SecretKey {
         &self.secret_key
+    }
+
+    /// Look up a known hub by alias from the .hubs files in root kosha
+    ///
+    /// Returns the hub's ID52 and URL if found.
+    pub async fn lookup_hub_by_alias(&self, alias: &str) -> Result<Option<ResolvedHubAuth>> {
+        let resolver = HubAuthResolver::for_root(&self.root_kosha);
+        let all_hubs = resolver.resolve_all().await?;
+        Ok(all_hubs.into_iter().find(|h| h.alias == alias))
+    }
+
+    /// Check if a hub ID is authorized (present in any .hubs file)
+    ///
+    /// Used for simple .hubs-based ACL when WASM modules are not present.
+    pub async fn is_hub_authorized(&self, hub_id52: &str) -> Result<bool> {
+        let resolver = HubAuthResolver::for_root(&self.root_kosha);
+        let all_hubs = resolver.resolve_all().await?;
+        Ok(all_hubs.iter().any(|h| h.id52 == hub_id52))
+    }
+
+    /// Forward a request to a remote hub
+    ///
+    /// Used when `target_hub != "self"` to forward the request to another hub.
+    pub async fn forward_request(
+        &self,
+        target_hub: &ResolvedHubAuth,
+        requester_hub_id: &str,
+        mut request: Request,
+    ) -> std::result::Result<Response, HubError> {
+        let url = target_hub.url.as_ref().ok_or_else(|| {
+            HubError::AppError {
+                message: format!("Hub '{}' has no URL configured", target_hub.alias),
+            }
+        })?;
+
+        // Create a client to forward the request
+        let client = fastn_net::client::Client::new(
+            self.secret_key.clone(),
+            target_hub.id52.clone(),
+            url.clone(),
+        );
+
+        // Change target_hub to "self" for the forwarded request (we're now at the target)
+        request.target_hub = "self".to_string();
+
+        // Call the remote hub
+        let result: std::result::Result<Response, HubError> = client.call(&request).await
+            .map_err(|e| HubError::AppError {
+                message: format!("Failed to forward request to hub '{}': {}", target_hub.alias, e),
+            })?;
+
+        result
     }
 
     /// Run the hub server
@@ -917,8 +991,8 @@ impl Hub {
                         }
                     };
 
-                    // For now, we assume the requester's hub ID is the same as their spoke ID
-                    let requester_hub_id = sender_id52.clone();
+                    // Use the from_hub field from the request - this is the hub that the spoke belongs to
+                    let requester_hub_id = request.from_hub.clone();
 
                     // Handle the request
                     let result = hub.handle_request(&sender_id52, &requester_hub_id, request).await;
@@ -969,6 +1043,10 @@ pub struct Request {
     /// The hub uses this to identify the spoke in pending connections.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alias: Option<String>,
+    /// The hub ID52 that this spoke belongs to
+    /// Used for ACL checking - the hub uses this to determine if the requester
+    /// is an "owner" (same hub) or a "remote" spoke (different hub)
+    pub from_hub: String,
     /// Target hub alias: "self" for local hub, or alias of a remote hub
     /// If not specified, defaults to "self"
     #[serde(default = "default_target_hub")]
