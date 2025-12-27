@@ -164,6 +164,60 @@
             }
         }
 
+        // Notify parent frame of status changes
+        function notifyStatus(status, message) {
+            if (window.parent && window.parent !== window) {
+                window.parent.postMessage({ type: 'status', status, message }, '*');
+            }
+        }
+
+        // Health check - periodically verify hub connectivity
+        let healthCheckInterval = null;
+        let lastHealthStatus = null;
+
+        async function checkHubHealth() {
+            try {
+                // Try to get spoke info - this will fail if hub is unreachable
+                const spokeInfo = await invoke('get_spoke_info');
+                if (spokeInfo.initialized) {
+                    // Try a lightweight operation to verify hub is actually reachable
+                    // We'll try to read a small file (spokes.txt exists on all hubs)
+                    await invoke('fetch_kosha_file', { kosha: 'root', path: 'spokes.txt' });
+                    if (lastHealthStatus !== 'connected') {
+                        lastHealthStatus = 'connected';
+                        notifyStatus('connected', 'Connected');
+                        console.log('Health check: Hub is reachable');
+                    }
+                }
+            } catch (e) {
+                const errorMsg = e.message || String(e);
+                if (lastHealthStatus !== 'error') {
+                    lastHealthStatus = 'error';
+                    if (errorMsg.includes('Network error') || errorMsg.includes('HTTP request failed')) {
+                        notifyStatus('error', 'Hub offline');
+                    } else {
+                        notifyStatus('error', 'Disconnected');
+                    }
+                    console.log('Health check: Hub unreachable -', errorMsg);
+                }
+            }
+        }
+
+        function startHealthCheck() {
+            // Check every 5 seconds
+            if (!healthCheckInterval) {
+                healthCheckInterval = setInterval(checkHubHealth, 5000);
+                console.log('Health check started (every 5s)');
+            }
+        }
+
+        function stopHealthCheck() {
+            if (healthCheckInterval) {
+                clearInterval(healthCheckInterval);
+                healthCheckInterval = null;
+            }
+        }
+
         // Main entry point
         async function main() {
             const loadingDiv = document.getElementById('loading');
@@ -193,9 +247,16 @@
                 // Load WASM from root kosha - scene.wasm is the default app
                 await shell.loadWasmFromHub(kosha, 'scene.wasm');
 
+                // Success! Notify parent that we're connected
+                lastHealthStatus = 'connected';
+                notifyStatus('connected');
+
                 loadingDiv.style.display = 'none';
                 canvas.style.display = 'block';
                 shell.render();
+
+                // Start health check polling
+                startHealthCheck();
 
                 console.log('fastn spoke app running');
                 console.log('Controls: WASD=move, IJKL=rotate, QE=up/down, 0=reset');
@@ -204,6 +265,17 @@
                 console.error('Error:', e);
                 loadingDiv.style.display = 'none';
                 errorDiv.textContent = e.message || String(e);
+
+                // Notify parent of the error
+                const errorMsg = e.message || String(e);
+                if (errorMsg.includes('Network error') || errorMsg.includes('HTTP request failed')) {
+                    lastHealthStatus = 'error';
+                    notifyStatus('error', 'Hub offline');
+                    // Start health check to detect when hub comes back
+                    startHealthCheck();
+                } else {
+                    notifyStatus('error', 'Error');
+                }
             }
         }
 

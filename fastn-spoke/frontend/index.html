@@ -42,6 +42,12 @@
         #status-bar .status-value.connected {
             color: #4ade80;
         }
+        #status-bar .status-value.configured {
+            color: #fbbf24;
+        }
+        #status-bar .status-value.error {
+            color: #f87171;
+        }
         #status-bar .status-value.disconnected {
             color: #f87171;
         }
@@ -290,6 +296,13 @@
             connectionStatus.classList.add('disconnected');
         }
 
+        // Update status indicator
+        function setStatus(status, text) {
+            connectionStatus.textContent = text || status;
+            connectionStatus.classList.remove('connected', 'configured', 'error', 'disconnected');
+            connectionStatus.classList.add(status);
+        }
+
         // Show the app
         function showApp(spokeInfo) {
             initFormDiv.style.display = 'none';
@@ -297,14 +310,24 @@
             loadingDiv.style.display = 'none';
             errorDiv.style.display = 'none';
 
-            connectionStatus.textContent = 'Connected';
-            connectionStatus.classList.remove('disconnected');
-            connectionStatus.classList.add('connected');
+            // Initially show as "Configured" (yellow) - will change to "Connected" when hub responds
+            setStatus('configured', 'Configured');
             hubIdDisplay.textContent = truncateId(spokeInfo.hub_id52);
             hubIdDisplay.title = spokeInfo.hub_id52;
             spokeIdDisplay.textContent = truncateId(spokeInfo.spoke_id52);
             spokeIdDisplay.title = spokeInfo.spoke_id52;
         }
+
+        // Listen for status updates from the iframe
+        window.addEventListener('message', (event) => {
+            if (event.data && event.data.type === 'status') {
+                if (event.data.status === 'connected') {
+                    setStatus('connected', 'Connected');
+                } else if (event.data.status === 'error') {
+                    setStatus('error', event.data.message || 'Error');
+                }
+            }
+        });
 
         // Show loading state
         function showLoading(message) {
