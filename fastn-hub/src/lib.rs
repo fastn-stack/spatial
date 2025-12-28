@@ -12,13 +12,18 @@
 
 use chrono::{DateTime, Utc};
 use fastn_kosha::Kosha;
+use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use thiserror::Error;
 
 pub use fastn_net::SecretKey;
-use fastn_net::{SignedRequest, SignedResponse, ResponseEnvelope, ENDPOINT};
+use fastn_net::{SignedRequest, SignedResponse, ResponseEnvelope, ENDPOINT, HubResponse};
+
+#[derive(Embed)]
+#[folder = "static/"]
+struct Assets;
 
 /// Error types for hub operations
 #[derive(Error, Debug)]
@@ -1010,8 +1015,10 @@ impl Hub {
     /// Default port is 3000 unless overridden.
     pub async fn serve(self, port: u16) -> Result<()> {
         use axum::{
-            http::StatusCode,
-            routing::post,
+            extract::Path,
+            http::{header, StatusCode},
+            response::{Html, IntoResponse, Response},
+            routing::{get, post},
             Json, Router,
         };
         use std::sync::Arc;
@@ -1020,13 +1027,41 @@ impl Hub {
 
         println!("Hub ID52: {}", hub.config.hub_id52);
         println!("FASTN_HOME: {:?}", hub.home);
-        println!("Listening on http://0.0.0.0:{}{}", port, ENDPOINT);
+        println!("Listening on http://0.0.0.0:{}", port);
+        println!("  Web UI: http://0.0.0.0:{}/", port);
+        println!("  API: http://0.0.0.0:{}{}", port, ENDPOINT);
 
         // Create the axum handler
         let hub_clone = hub.clone();
         let secret_key = hub.secret_key.clone();
 
+        // Static file handler
+        async fn serve_static(Path(path): Path<String>) -> Response {
+            let path = if path.is_empty() { "index.html".to_string() } else { path };
+            match Assets::get(&path) {
+                Some(content) => {
+                    let mime = mime_guess::from_path(&path).first_or_octet_stream();
+                    (
+                        [(header::CONTENT_TYPE, mime.as_ref())],
+                        content.data.into_owned(),
+                    )
+                        .into_response()
+                }
+                None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
+            }
+        }
+
+        // Index handler
+        async fn serve_index() -> Response {
+            match Assets::get("index.html") {
+                Some(content) => Html(String::from_utf8_lossy(&content.data).to_string()).into_response(),
+                None => (StatusCode::NOT_FOUND, "404 Not Found").into_response(),
+            }
+        }
+
         let app = Router::new()
+            .route("/", get(serve_index))
+            .route("/{*path}", get(serve_static))
             .route(ENDPOINT, post(move |Json(signed_req): Json<SignedRequest>| {
                 let hub = hub_clone.clone();
                 let secret_key = secret_key.clone();
@@ -1049,7 +1084,7 @@ impl Hub {
                     let result = hub.handle_request(&sender_id52, request).await;
 
                     // Wrap in envelope and sign response
-                    let envelope: ResponseEnvelope<Response, HubError> = match result {
+                    let envelope: ResponseEnvelope<HubResponse, HubError> = match result {
                         Ok(res) => ResponseEnvelope::Ok(res),
                         Err(err) => ResponseEnvelope::Err(err),
                     };
