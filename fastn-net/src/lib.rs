@@ -66,7 +66,7 @@ pub enum Error {
     #[error("Base64 decode error: {0}")]
     Base64Decode(String),
 
-    #[cfg(feature = "client")]
+    #[cfg(any(feature = "client", target_arch = "wasm32"))]
     #[error("HTTP request failed: {0}")]
     HttpRequest(String),
 
@@ -291,6 +291,54 @@ impl<T, E> ResponseEnvelope<T, E> {
 }
 
 // ============================================================================
+// Hub Protocol Types (used by both hub and spoke)
+// ============================================================================
+
+/// Request envelope from spokes to hub
+/// Hub routes based on (app, instance) and does ACL check before forwarding
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubRequest {
+    /// Target hub alias: "self" for local hub, or alias of a remote hub
+    /// If not specified, defaults to "self"
+    #[serde(default = "default_target_hub")]
+    pub target_hub: String,
+    /// Application type (e.g., "kosha", "chat", "sync")
+    pub app: String,
+    /// Application instance (e.g., "my-kosha", "work-chat")
+    pub instance: String,
+    /// Application-specific command name
+    pub command: String,
+    /// Application-specific payload (JSON)
+    pub payload: serde_json::Value,
+}
+
+fn default_target_hub() -> String {
+    "self".to_string()
+}
+
+/// Response envelope from hub to spokes
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubResponse {
+    /// Application-specific response payload (JSON)
+    pub payload: serde_json::Value,
+}
+
+/// Hub-level errors (before reaching application)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum HubError {
+    /// Spoke not authorized for this hub
+    Unauthorized,
+    /// Spoke not authorized for this (app, instance)
+    AccessDenied { app: String, instance: String },
+    /// Application type not registered
+    AppNotFound { app: String },
+    /// Application instance not found
+    InstanceNotFound { app: String, instance: String },
+    /// Application returned an error
+    AppError { message: String },
+}
+
+// ============================================================================
 // HTTP Client (Spoke side)
 // ============================================================================
 
@@ -363,6 +411,87 @@ pub mod client {
                 .json()
                 .await
                 .map_err(|e| Error::HttpRequest(e.to_string()))?;
+
+            // Verify response came from the expected hub
+            let envelope: ResponseEnvelope<Res, Err> = signed_res.verify_from(&self.hub_id52)?;
+
+            Ok(envelope.into_result())
+        }
+    }
+}
+
+// ============================================================================
+// HTTP Client for WASM (Spoke side)
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+pub mod web_client {
+    use super::*;
+
+    /// HTTP client for making signed requests to a hub (WASM version using gloo-net)
+    pub struct Client {
+        secret_key: SecretKey,
+        hub_id52: String,
+        hub_url: String,
+    }
+
+    impl Client {
+        /// Create a new client
+        pub fn new(secret_key: SecretKey, hub_id52: String, hub_url: String) -> Self {
+            Self {
+                secret_key,
+                hub_id52,
+                hub_url: hub_url.trim_end_matches('/').to_string(),
+            }
+        }
+
+        /// Get our ID52
+        pub fn id52(&self) -> String {
+            self.secret_key.id52()
+        }
+
+        /// Get the hub's ID52
+        pub fn hub_id52(&self) -> &str {
+            &self.hub_id52
+        }
+
+        /// Make a signed request and get a verified response
+        pub async fn call<Req, Res, Err>(
+            &self,
+            request: &Req,
+        ) -> Result<std::result::Result<Res, Err>>
+        where
+            Req: Serialize,
+            Res: DeserializeOwned,
+            Err: DeserializeOwned,
+        {
+            use gloo_net::http::Request;
+
+            // Sign the request
+            let signed_req = SignedRequest::new(&self.secret_key, request)?;
+
+            // Send HTTP POST
+            let url = format!("{}{}", self.hub_url, ENDPOINT);
+            let response = Request::post(&url)
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_string(&signed_req)?)
+                .map_err(|e| Error::HttpRequest(e.to_string()))?
+                .send()
+                .await
+                .map_err(|e| Error::HttpRequest(e.to_string()))?;
+
+            if !response.ok() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                return Err(Error::HttpRequest(format!("HTTP {}: {}", status, text)));
+            }
+
+            // Parse and verify response
+            let text = response
+                .text()
+                .await
+                .map_err(|e| Error::HttpRequest(e.to_string()))?;
+            let signed_res: SignedResponse = serde_json::from_str(&text)?;
 
             // Verify response came from the expected hub
             let envelope: ResponseEnvelope<Res, Err> = signed_res.verify_from(&self.hub_id52)?;

@@ -1084,50 +1084,18 @@ impl Hub {
 // ============================================================================
 // Hub Protocol - Generic Application Router
 // ============================================================================
+//
+// These types are defined in fastn-net for cross-platform compatibility.
+// Re-exported here with shorter names for backward compatibility.
 
-/// Request envelope from spokes
-/// Hub routes based on (app, instance) and does ACL check before forwarding
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Request {
-    /// Target hub alias: "self" for local hub, or alias of a remote hub
-    /// If not specified, defaults to "self"
-    #[serde(default = "default_target_hub")]
-    pub target_hub: String,
-    /// Application type (e.g., "kosha", "chat", "sync")
-    pub app: String,
-    /// Application instance (e.g., "my-kosha", "work-chat")
-    pub instance: String,
-    /// Application-specific command name
-    pub command: String,
-    /// Application-specific payload (JSON)
-    pub payload: serde_json::Value,
-}
+/// Request envelope from spokes (re-exported from fastn-net)
+pub use fastn_net::HubRequest as Request;
 
-fn default_target_hub() -> String {
-    "self".to_string()
-}
+/// Response envelope to spokes (re-exported from fastn-net)
+pub use fastn_net::HubResponse as Response;
 
-/// Response envelope to spokes
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Response {
-    /// Application-specific response payload (JSON)
-    pub payload: serde_json::Value,
-}
-
-/// Hub-level errors (before reaching application)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum HubError {
-    /// Spoke not authorized for this hub
-    Unauthorized,
-    /// Spoke not authorized for this (app, instance)
-    AccessDenied { app: String, instance: String },
-    /// Application type not registered
-    AppNotFound { app: String },
-    /// Application instance not found
-    InstanceNotFound { app: String, instance: String },
-    /// Application returned an error
-    AppError { message: String },
-}
+/// Hub-level errors (re-exported from fastn-net)
+pub use fastn_net::HubError;
 
 // ============================================================================
 // ACL - WASM-based Access Control (Cascading)

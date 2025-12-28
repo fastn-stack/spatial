@@ -13,12 +13,17 @@ thiserror = "2.0"
 data-encoding = "2.6"
 tracing = "0.1"
 
-# HTTP client for spoke
+# HTTP client for spoke (native) - only on non-wasm targets
 reqwest = { version = "0.12", features = ["json"], default-features = false, optional = true }
 
-# HTTP server for hub
+# HTTP server for hub (native only)
 axum = { version = "0.8", optional = true }
 tokio = { version = "1", features = ["sync", "rt"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# HTTP client for spoke (web/WASM)
+gloo-net = "0.6"
+wasm-bindgen-futures = "0.4"
 
 [features]
 default = ["client", "server"]
