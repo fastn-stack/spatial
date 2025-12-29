@@ -984,6 +984,329 @@ mod wasm {
             .await
         }
     }
+
+    // ========================================================================
+    // JavaScript-callable exports
+    // ========================================================================
+
+    use std::cell::RefCell;
+
+    thread_local! {
+        static SPOKE_INSTANCE: RefCell<Option<Spoke>> = RefCell::new(None);
+    }
+
+    /// Check if spoke is initialized in browser storage
+    #[wasm_bindgen]
+    pub async fn spoke_is_initialized() -> bool {
+        Spoke::is_initialized().await
+    }
+
+    /// Initialize a new spoke with hub connection info
+    /// Returns the spoke's ID52 on success
+    #[wasm_bindgen]
+    pub async fn spoke_init(hub_id52: &str, hub_url: &str, alias: &str) -> std::result::Result<String, JsValue> {
+        let spoke = Spoke::init(hub_id52, hub_url, alias)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let id52 = spoke.id52().to_string();
+        SPOKE_INSTANCE.with(|s| {
+            *s.borrow_mut() = Some(spoke);
+        });
+        Ok(id52)
+    }
+
+    /// Load an existing spoke from browser storage
+    /// Returns the spoke's ID52 on success
+    #[wasm_bindgen]
+    pub async fn spoke_load() -> std::result::Result<String, JsValue> {
+        let spoke = Spoke::load()
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let id52 = spoke.id52().to_string();
+        SPOKE_INSTANCE.with(|s| {
+            *s.borrow_mut() = Some(spoke);
+        });
+        Ok(id52)
+    }
+
+    /// Load or initialize spoke - initializes if not exists
+    /// Returns the spoke's ID52 on success
+    #[wasm_bindgen]
+    pub async fn spoke_load_or_init(hub_id52: &str, hub_url: &str, alias: &str) -> std::result::Result<String, JsValue> {
+        let spoke = Spoke::load_or_init(hub_id52, hub_url, alias)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let id52 = spoke.id52().to_string();
+        SPOKE_INSTANCE.with(|s| {
+            *s.borrow_mut() = Some(spoke);
+        });
+        Ok(id52)
+    }
+
+    /// Get the current spoke's ID52
+    #[wasm_bindgen]
+    pub fn spoke_id52() -> std::result::Result<String, JsValue> {
+        SPOKE_INSTANCE.with(|s| {
+            s.borrow()
+                .as_ref()
+                .map(|spoke| spoke.id52().to_string())
+                .ok_or_else(|| JsValue::from_str("Spoke not loaded"))
+        })
+    }
+
+    /// Get the spoke's alias
+    #[wasm_bindgen]
+    pub fn spoke_alias() -> std::result::Result<String, JsValue> {
+        SPOKE_INSTANCE.with(|s| {
+            s.borrow()
+                .as_ref()
+                .map(|spoke| spoke.alias().to_string())
+                .ok_or_else(|| JsValue::from_str("Spoke not loaded"))
+        })
+    }
+
+    /// Get the configured hub's ID52
+    #[wasm_bindgen]
+    pub fn spoke_hub_id52() -> std::result::Result<String, JsValue> {
+        SPOKE_INSTANCE.with(|s| {
+            s.borrow()
+                .as_ref()
+                .map(|spoke| spoke.hub_id52().to_string())
+                .ok_or_else(|| JsValue::from_str("Spoke not loaded"))
+        })
+    }
+
+    /// Get the configured hub's URL
+    #[wasm_bindgen]
+    pub fn spoke_hub_url() -> std::result::Result<String, JsValue> {
+        SPOKE_INSTANCE.with(|s| {
+            s.borrow()
+                .as_ref()
+                .map(|spoke| spoke.hub_url().to_string())
+                .ok_or_else(|| JsValue::from_str("Spoke not loaded"))
+        })
+    }
+
+    /// Send a request to the hub
+    /// Returns the response payload as JSON string
+    #[wasm_bindgen]
+    pub async fn spoke_send_request(
+        target_hub: &str,
+        app: &str,
+        instance: &str,
+        command: &str,
+        payload_json: &str,
+    ) -> std::result::Result<String, JsValue> {
+        let payload: serde_json::Value = serde_json::from_str(payload_json)
+            .map_err(|e| JsValue::from_str(&format!("Invalid JSON payload: {}", e)))?;
+
+        // Get spoke info to create connection
+        let (secret_key, hub_id52, hub_url) = SPOKE_INSTANCE.with(|s| {
+            let spoke = s.borrow();
+            let spoke = spoke.as_ref().ok_or_else(|| JsValue::from_str("Spoke not loaded"))?;
+            Ok::<_, JsValue>((
+                spoke.secret_key().clone(),
+                spoke.hub_id52().to_string(),
+                spoke.hub_url().to_string(),
+            ))
+        })?;
+
+        // Create client and connection for this request
+        let client = fastn_net::web_client::Client::new(
+            secret_key,
+            hub_id52.clone(),
+            hub_url,
+        );
+
+        let request = fastn_net::HubRequest {
+            target_hub: target_hub.to_string(),
+            app: app.to_string(),
+            instance: instance.to_string(),
+            command: command.to_string(),
+            payload,
+        };
+
+        let result: std::result::Result<fastn_net::HubResponse, fastn_net::HubError> =
+            client.call(&request).await
+                .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        match result {
+            Ok(response) => serde_json::to_string(&response.payload)
+                .map_err(|e| JsValue::from_str(&format!("Failed to serialize response: {}", e))),
+            Err(hub_error) => Err(JsValue::from_str(&format!("Hub error: {:?}", hub_error))),
+        }
+    }
+
+    /// Get spoke info as JSON
+    #[wasm_bindgen]
+    pub fn spoke_info() -> std::result::Result<String, JsValue> {
+        SPOKE_INSTANCE.with(|s| {
+            let spoke = s.borrow();
+            let spoke = spoke.as_ref().ok_or_else(|| JsValue::from_str("Spoke not loaded"))?;
+
+            let info = serde_json::json!({
+                "id52": spoke.id52(),
+                "alias": spoke.alias(),
+                "hub_id52": spoke.hub_id52(),
+                "hub_url": spoke.hub_url(),
+            });
+
+            serde_json::to_string(&info)
+                .map_err(|e| JsValue::from_str(&format!("Failed to serialize info: {}", e)))
+        })
+    }
+
+    /// Fetch hub info from the server (public endpoint)
+    /// Returns JSON with hub_id52
+    #[wasm_bindgen]
+    pub async fn fetch_hub_info() -> std::result::Result<String, JsValue> {
+        use wasm_bindgen_futures::JsFuture;
+        use web_sys::{Request, RequestInit, Response};
+
+        let window = web_sys::window()
+            .ok_or_else(|| JsValue::from_str("No window object"))?;
+
+        // Get the hub URL from window.location.origin
+        let location = window.location();
+        let origin = location.origin()
+            .map_err(|e| JsValue::from_str(&format!("Failed to get origin: {:?}", e)))?;
+
+        let url = format!("{}/hub-info", origin);
+
+        // Fetch hub info
+        let opts = RequestInit::new();
+        opts.set_method("GET");
+
+        let request = Request::new_with_str_and_init(&url, &opts)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create request: {:?}", e)))?;
+
+        let resp_value = JsFuture::from(window.fetch_with_request(&request))
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Fetch failed: {:?}", e)))?;
+
+        let resp: Response = resp_value.unchecked_into();
+
+        if !resp.ok() {
+            return Err(JsValue::from_str(&format!("Hub info request failed: {}", resp.status())));
+        }
+
+        let json = JsFuture::from(resp.text().unwrap())
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to get response text: {:?}", e)))?;
+
+        Ok(json.as_string().unwrap_or_default())
+    }
+
+    /// Initialize spoke with just alias and password
+    /// Fetches hub info automatically and registers with the hub
+    /// Returns the spoke's ID52 on success
+    #[wasm_bindgen]
+    pub async fn spoke_init_simple(alias: &str, password: &str) -> std::result::Result<String, JsValue> {
+        use wasm_bindgen_futures::JsFuture;
+        use web_sys::{Request, RequestInit, RequestMode, Headers, Response};
+
+        // Check if already initialized
+        if Spoke::is_initialized().await {
+            return Err(JsValue::from_str("Spoke already initialized"));
+        }
+
+        let window = web_sys::window()
+            .ok_or_else(|| JsValue::from_str("No window object"))?;
+
+        // Get hub URL from window.location.origin
+        let location = window.location();
+        let hub_url = location.origin()
+            .map_err(|e| JsValue::from_str(&format!("Failed to get origin: {:?}", e)))?;
+
+        // Fetch hub info to get hub_id52
+        let hub_info_url = format!("{}/hub-info", hub_url);
+        let opts = RequestInit::new();
+        opts.set_method("GET");
+
+        let request = Request::new_with_str_and_init(&hub_info_url, &opts)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create request: {:?}", e)))?;
+
+        let resp_value = JsFuture::from(window.fetch_with_request(&request))
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to fetch hub info: {:?}", e)))?;
+
+        let resp: Response = resp_value.unchecked_into();
+        if !resp.ok() {
+            return Err(JsValue::from_str(&format!("Hub info request failed: {}", resp.status())));
+        }
+
+        let json_text = JsFuture::from(resp.text().unwrap())
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to get hub info text: {:?}", e)))?
+            .as_string()
+            .unwrap_or_default();
+
+        let hub_info: serde_json::Value = serde_json::from_str(&json_text)
+            .map_err(|e| JsValue::from_str(&format!("Failed to parse hub info: {}", e)))?;
+
+        let hub_id52 = hub_info["hub_id52"]
+            .as_str()
+            .ok_or_else(|| JsValue::from_str("Hub info missing hub_id52"))?;
+
+        // Initialize the spoke (generates new key, saves to OPFS)
+        let spoke = Spoke::init(hub_id52, &hub_url, alias)
+            .await
+            .map_err(|e| JsValue::from_str(&e.to_string()))?;
+
+        let spoke_id52 = spoke.id52().to_string();
+
+        // Register with the hub using password
+        let register_url = format!("{}/register-spoke", hub_url);
+        let register_body = serde_json::json!({
+            "spoke_id52": spoke_id52,
+            "alias": alias,
+            "password": password
+        });
+
+        let opts = RequestInit::new();
+        opts.set_method("POST");
+        opts.set_mode(RequestMode::SameOrigin);
+
+        let headers = Headers::new()
+            .map_err(|e| JsValue::from_str(&format!("Failed to create headers: {:?}", e)))?;
+        headers.set("Content-Type", "application/json")
+            .map_err(|e| JsValue::from_str(&format!("Failed to set header: {:?}", e)))?;
+        opts.set_headers(&headers);
+
+        opts.set_body(&JsValue::from_str(&register_body.to_string()));
+
+        let request = Request::new_with_str_and_init(&register_url, &opts)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create register request: {:?}", e)))?;
+
+        let resp_value = JsFuture::from(window.fetch_with_request(&request))
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to register spoke: {:?}", e)))?;
+
+        let resp: Response = resp_value.unchecked_into();
+        let register_text = JsFuture::from(resp.text().unwrap())
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to get register response: {:?}", e)))?
+            .as_string()
+            .unwrap_or_default();
+
+        let register_result: serde_json::Value = serde_json::from_str(&register_text)
+            .map_err(|e| JsValue::from_str(&format!("Failed to parse register response: {}", e)))?;
+
+        if !register_result["success"].as_bool().unwrap_or(false) {
+            let error = register_result["error"].as_str().unwrap_or("Unknown error");
+            return Err(JsValue::from_str(&format!("Registration failed: {}", error)));
+        }
+
+        // Store the spoke instance
+        SPOKE_INSTANCE.with(|s| {
+            *s.borrow_mut() = Some(spoke);
+        });
+
+        Ok(spoke_id52)
+    }
 }
 
 #[cfg(target_arch = "wasm32")]

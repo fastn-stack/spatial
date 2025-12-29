@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>fastn Hub</title>
+    <title>fastn Spoke</title>
     <style>
         * {
             margin: 0;
@@ -18,16 +18,17 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            justify-content: center;
+            padding: 2rem;
         }
         .container {
             text-align: center;
             padding: 2rem;
-            max-width: 600px;
+            max-width: 700px;
+            width: 100%;
         }
         h1 {
-            font-size: 3rem;
-            margin-bottom: 1rem;
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
             background: linear-gradient(90deg, #00d9ff, #00ff88);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
@@ -35,51 +36,113 @@
         }
         .subtitle {
             color: #888;
-            font-size: 1.2rem;
+            font-size: 1rem;
             margin-bottom: 2rem;
         }
-        .status {
-            background: rgba(255,255,255,0.1);
+        .card {
+            background: rgba(255,255,255,0.08);
             border-radius: 12px;
             padding: 1.5rem;
-            margin-top: 2rem;
+            margin-bottom: 1.5rem;
+            text-align: left;
         }
-        .status h2 {
+        .card h2 {
             font-size: 1rem;
             color: #00ff88;
             margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
-        .status-item {
+        .info-row {
             display: flex;
             justify-content: space-between;
             padding: 0.5rem 0;
             border-bottom: 1px solid rgba(255,255,255,0.1);
         }
-        .status-item:last-child {
+        .info-row:last-child {
             border-bottom: none;
         }
-        .status-label {
+        .info-label {
             color: #888;
         }
-        .status-value {
+        .info-value {
             color: #00d9ff;
             font-family: monospace;
+            word-break: break-all;
         }
-        .api-info {
-            margin-top: 2rem;
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        .form-group label {
+            display: block;
+            color: #888;
+            margin-bottom: 0.3rem;
             font-size: 0.9rem;
-            color: #666;
         }
-        .api-info code {
+        .form-group input, .form-group textarea {
+            width: 100%;
+            padding: 0.75rem;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px;
+            color: #eee;
+            font-family: inherit;
+            font-size: 0.95rem;
+        }
+        .form-group input:focus, .form-group textarea:focus {
+            outline: none;
+            border-color: #00d9ff;
+        }
+        .form-group textarea {
+            font-family: monospace;
+            resize: vertical;
+            min-height: 80px;
+        }
+        button {
+            background: linear-gradient(90deg, #00d9ff, #00ff88);
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 6px;
+            color: #1a1a2e;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 0.95rem;
+            transition: transform 0.1s, opacity 0.1s;
+        }
+        button:hover {
+            transform: translateY(-1px);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        .btn-secondary {
+            background: rgba(255,255,255,0.1);
+            color: #eee;
+        }
+        .status {
+            padding: 0.5rem 1rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+            font-size: 0.9rem;
+        }
+        .status.loading {
             background: rgba(0,217,255,0.2);
-            padding: 0.2rem 0.5rem;
-            border-radius: 4px;
             color: #00d9ff;
         }
-        #loading {
-            display: none;
-            margin-top: 1rem;
-            color: #888;
+        .status.success {
+            background: rgba(0,255,136,0.2);
+            color: #00ff88;
+        }
+        .status.error {
+            background: rgba(255,100,100,0.2);
+            color: #ff6464;
+        }
+        .hidden {
+            display: none !important;
         }
         .spinner {
             width: 20px;
@@ -95,43 +158,333 @@
         @keyframes spin {
             to { transform: rotate(360deg); }
         }
+        .response-output {
+            background: rgba(0,0,0,0.4);
+            border-radius: 6px;
+            padding: 1rem;
+            margin-top: 1rem;
+            font-family: monospace;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            word-break: break-all;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .button-row {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+        .app-iframe {
+            width: 100%;
+            height: 80vh;
+            border: none;
+            border-radius: 12px;
+            background: #000;
+        }
+        .full-width {
+            max-width: none;
+            width: 100%;
+            padding: 0;
+        }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>fastn Hub</h1>
-        <p class="subtitle">P2P Network Hub Server</p>
+    <div class="container" id="main-container">
+        <h1>fastn Spoke</h1>
+        <p class="subtitle">Browser-based P2P Client</p>
 
-        <div class="status">
-            <h2>Hub Status</h2>
-            <div class="status-item">
-                <span class="status-label">Status</span>
-                <span class="status-value" id="status">Online</span>
+        <div id="status" class="status loading">
+            <span class="spinner"></span>Loading WASM module...
+        </div>
+
+        <!-- Init Form (shown when not initialized) -->
+        <div id="init-section" class="card hidden">
+            <h2>Connect to Hub</h2>
+            <p style="color: #888; margin-bottom: 1rem; font-size: 0.9rem;">
+                Enter a name for this device and the hub password to connect.
+            </p>
+            <div class="form-group">
+                <label for="spoke-label">Device Name</label>
+                <input type="text" id="spoke-label" name="spoke-label" autocomplete="off" placeholder="My Browser Spoke">
             </div>
-            <div class="status-item">
-                <span class="status-label">API Endpoint</span>
-                <span class="status-value">/_fastn</span>
+            <div class="form-group">
+                <label for="hub-password">Hub Password</label>
+                <input type="password" id="hub-password" name="hub-password" autocomplete="new-password" placeholder="Enter hub password">
             </div>
-            <div class="status-item">
-                <span class="status-label">Protocol</span>
-                <span class="status-value">Signed JSON</span>
+            <button id="init-btn" onclick="initSpoke()">Connect</button>
+        </div>
+
+        <!-- Spoke Info (shown when initialized) -->
+        <div id="spoke-section" class="card hidden">
+            <h2>Connected</h2>
+            <div class="info-row">
+                <span class="info-label">Spoke ID</span>
+                <span class="info-value" id="spoke-id52">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Device Name</span>
+                <span class="info-value" id="spoke-alias">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">Hub ID</span>
+                <span class="info-value" id="hub-id52-display">-</span>
             </div>
         </div>
 
-        <div class="api-info">
-            <p>API accepts signed requests via <code>POST /_fastn</code></p>
+        <!-- App Section (shown when initialized) -->
+        <div id="app-section" class="hidden">
+            <iframe id="app-iframe" class="app-iframe" sandbox="allow-scripts allow-same-origin"></iframe>
         </div>
 
-        <div id="loading">
-            <span class="spinner"></span>
-            Loading spoke app...
+        <!-- Request Form (hidden by default, for debugging) -->
+        <div id="request-section" class="card hidden">
+            <h2>Send Request</h2>
+            <div class="form-group">
+                <label for="target-hub">Target Hub ID52</label>
+                <input type="text" id="target-hub" placeholder="self (or hub ID52)">
+            </div>
+            <div class="form-group">
+                <label for="app">App</label>
+                <input type="text" id="app" value="kosha" placeholder="kosha">
+            </div>
+            <div class="form-group">
+                <label for="instance">Instance</label>
+                <input type="text" id="instance" value="root" placeholder="root">
+            </div>
+            <div class="form-group">
+                <label for="command">Command</label>
+                <input type="text" id="command" value="list_dir" placeholder="list_dir">
+            </div>
+            <div class="form-group">
+                <label for="payload">Payload (JSON)</label>
+                <textarea id="payload">{"path": "/"}</textarea>
+            </div>
+            <button id="send-btn" onclick="sendRequest()">Send Request</button>
+
+            <div id="response-output" class="response-output hidden"></div>
         </div>
     </div>
 
-    <script>
-        // Future: Load fastn-spoke WASM app here
-        // For now, just show the hub status page
-        console.log('fastn Hub web interface loaded');
+    <script type="module">
+        import init, {
+            spoke_is_initialized,
+            spoke_init,
+            spoke_init_simple,
+            spoke_load,
+            spoke_load_or_init,
+            spoke_info,
+            spoke_send_request,
+            spoke_id52,
+            spoke_alias,
+            spoke_hub_id52,
+            spoke_hub_url,
+            fetch_hub_info
+        } from './fastn_spoke.js';
+
+        // Make functions available globally
+        window.spokeAPI = {
+            spoke_is_initialized,
+            spoke_init,
+            spoke_init_simple,
+            spoke_load,
+            spoke_load_or_init,
+            spoke_info,
+            spoke_send_request,
+            spoke_id52,
+            spoke_alias,
+            spoke_hub_id52,
+            spoke_hub_url,
+            fetch_hub_info
+        };
+
+        const statusEl = document.getElementById('status');
+        const initSection = document.getElementById('init-section');
+        const spokeSection = document.getElementById('spoke-section');
+        const appSection = document.getElementById('app-section');
+        const requestSection = document.getElementById('request-section');
+
+        function showStatus(message, type = 'loading') {
+            statusEl.className = `status ${type}`;
+            if (type === 'loading') {
+                statusEl.innerHTML = `<span class="spinner"></span>${message}`;
+            } else {
+                statusEl.textContent = message;
+            }
+            statusEl.classList.remove('hidden');
+        }
+
+        function hideStatus() {
+            statusEl.classList.add('hidden');
+        }
+
+        async function updateSpokeInfo() {
+            try {
+                document.getElementById('spoke-id52').textContent = spoke_id52();
+                document.getElementById('spoke-alias').textContent = spoke_alias();
+                document.getElementById('hub-id52-display').textContent = spoke_hub_id52();
+
+                // Set default target hub for debug section
+                document.getElementById('target-hub').value = spoke_hub_id52();
+            } catch (e) {
+                console.error('Failed to get spoke info:', e);
+            }
+        }
+
+        function showApp() {
+            // Expand container to full width for app
+            document.getElementById('main-container').classList.add('full-width');
+
+            // Load index.wasm from root kosha in iframe
+            // For now we use a placeholder - in production this would load via spoke
+            const iframe = document.getElementById('app-iframe');
+            iframe.srcdoc = `
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <style>
+                        body {
+                            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+                            background: #1a1a2e;
+                            color: #eee;
+                            display: flex;
+                            justify-content: center;
+                            align-items: center;
+                            height: 100vh;
+                            margin: 0;
+                        }
+                        .message {
+                            text-align: center;
+                            padding: 2rem;
+                        }
+                        h2 {
+                            color: #00ff88;
+                            margin-bottom: 1rem;
+                        }
+                        p {
+                            color: #888;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="message">
+                        <h2>Spoke Connected</h2>
+                        <p>Your device is connected to the hub.</p>
+                        <p style="color: #00d9ff; margin-top: 1rem; font-size: 0.9rem;">
+                            Use the Tauri or native spoke client to run spatial apps.
+                        </p>
+                    </div>
+                </body>
+                </html>
+            `;
+            appSection.classList.remove('hidden');
+        }
+
+        async function checkInitialized() {
+            const isInit = await spoke_is_initialized();
+            if (isInit) {
+                try {
+                    await spoke_load();
+                    await updateSpokeInfo();
+                    initSection.classList.add('hidden');
+                    spokeSection.classList.remove('hidden');
+                    showApp();
+                    showStatus('Connected to hub', 'success');
+                    setTimeout(hideStatus, 2000);
+                } catch (e) {
+                    showStatus('Failed to load spoke: ' + e, 'error');
+                }
+            } else {
+                initSection.classList.remove('hidden');
+                spokeSection.classList.add('hidden');
+                appSection.classList.add('hidden');
+                showStatus('Not connected. Enter your device name and hub password.', 'loading');
+                statusEl.querySelector('.spinner')?.remove();
+            }
+        }
+
+        // Initialize WASM module
+        async function startup() {
+            try {
+                showStatus('Loading WASM module...');
+                await init();
+                console.log('fastn-spoke WASM loaded');
+                showStatus('Checking spoke status...');
+                await checkInitialized();
+            } catch (e) {
+                showStatus('Failed to load WASM: ' + e, 'error');
+                console.error('WASM init error:', e);
+            }
+        }
+
+        startup();
+
+        // Expose functions to global scope for onclick handlers
+        window.initSpoke = async function() {
+            const alias = document.getElementById('spoke-label').value.trim() || 'Browser Spoke';
+            const password = document.getElementById('hub-password').value;
+
+            if (!password) {
+                showStatus('Please enter the hub password', 'error');
+                return;
+            }
+
+            const btn = document.getElementById('init-btn');
+            btn.disabled = true;
+            showStatus('Connecting to hub...');
+
+            try {
+                // Use the simple init that fetches hub info and registers with password
+                const spokeId = await spoke_init_simple(alias, password);
+                console.log('Spoke initialized with ID:', spokeId);
+                await updateSpokeInfo();
+                initSection.classList.add('hidden');
+                spokeSection.classList.remove('hidden');
+                showApp();
+                showStatus('Connected: ' + spokeId, 'success');
+                setTimeout(hideStatus, 3000);
+            } catch (e) {
+                showStatus('Connection failed: ' + e, 'error');
+                console.error('Init error:', e);
+            } finally {
+                btn.disabled = false;
+            }
+        };
+
+        window.sendRequest = async function() {
+            const targetHub = document.getElementById('target-hub').value.trim() || 'self';
+            const app = document.getElementById('app').value.trim();
+            const instance = document.getElementById('instance').value.trim();
+            const command = document.getElementById('command').value.trim();
+            const payloadStr = document.getElementById('payload').value.trim();
+
+            if (!app || !instance || !command) {
+                showStatus('Please fill in app, instance, and command', 'error');
+                return;
+            }
+
+            const btn = document.getElementById('send-btn');
+            const outputEl = document.getElementById('response-output');
+            btn.disabled = true;
+            showStatus('Sending request...');
+            outputEl.classList.add('hidden');
+
+            try {
+                const response = await spoke_send_request(targetHub, app, instance, command, payloadStr);
+                const parsed = JSON.parse(response);
+                outputEl.textContent = JSON.stringify(parsed, null, 2);
+                outputEl.classList.remove('hidden');
+                showStatus('Request successful', 'success');
+                setTimeout(hideStatus, 2000);
+            } catch (e) {
+                outputEl.textContent = 'Error: ' + e;
+                outputEl.classList.remove('hidden');
+                showStatus('Request failed: ' + e, 'error');
+                console.error('Request error:', e);
+            } finally {
+                btn.disabled = false;
+            }
+        };
     </script>
 </body>
 </html>

@@ -92,6 +92,31 @@ impl SenderIdentity {
 pub struct HubConfig {
     pub hub_id52: String,
     pub created_at: DateTime<Utc>,
+    /// Optional password for spoke registration (if None, registration is disabled)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoke_password: Option<String>,
+}
+
+/// Response for /hub-info endpoint (public info)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HubInfo {
+    pub hub_id52: String,
+}
+
+/// Request for /register-spoke endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterSpokeRequest {
+    pub spoke_id52: String,
+    pub alias: String,
+    pub password: String,
+}
+
+/// Response for /register-spoke endpoint
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterSpokeResponse {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// An authorized spoke entry (parsed from spokes.txt)
@@ -559,6 +584,7 @@ impl Hub {
         let config = HubConfig {
             hub_id52,
             created_at: Utc::now(),
+            spoke_password: None,
         };
         let config_path = home.join("config.json");
         let config_json = serde_json::to_string_pretty(&config)?;
@@ -762,6 +788,58 @@ impl Hub {
             self.save_spokes().await?;
         }
         Ok(removed)
+    }
+
+    /// Register a spoke using password authentication
+    ///
+    /// This is called from the web UI when a user provides the hub password.
+    /// Returns Ok(()) if registration successful, Err if password invalid or registration disabled.
+    pub async fn register_spoke_with_password(
+        &mut self,
+        spoke_id52: &str,
+        alias: &str,
+        password: &str,
+    ) -> Result<()> {
+        // Check if registration is enabled
+        let expected_password = self.config.spoke_password.as_ref().ok_or_else(|| {
+            Error::Unauthorized("Spoke registration is disabled on this hub".to_string())
+        })?;
+
+        // Check password
+        if password != expected_password {
+            return Err(Error::Unauthorized("Invalid password".to_string()));
+        }
+
+        // Validate ID52 format
+        fastn_net::from_id52(spoke_id52).map_err(|_| Error::InvalidId52(spoke_id52.to_string()))?;
+
+        // Add the spoke
+        self.spokes.add(spoke_id52, alias);
+        self.save_spokes().await?;
+
+        tracing::info!("Registered new spoke: {} ({})", alias, spoke_id52);
+        Ok(())
+    }
+
+    /// Get hub info for public endpoint
+    pub fn hub_info(&self) -> HubInfo {
+        HubInfo {
+            hub_id52: self.config.hub_id52.clone(),
+        }
+    }
+
+    /// Set the spoke registration password
+    pub async fn set_spoke_password(&mut self, password: Option<String>) -> Result<()> {
+        self.config.spoke_password = password;
+        self.save_config().await
+    }
+
+    /// Save config to disk
+    async fn save_config(&self) -> Result<()> {
+        let config_path = self.home.join("config.json");
+        let config_json = serde_json::to_string_pretty(&self.config)?;
+        tokio::fs::write(&config_path, config_json).await?;
+        Ok(())
     }
 
     /// Check if a spoke is authorized
@@ -1022,18 +1100,20 @@ impl Hub {
             Json, Router,
         };
         use std::sync::Arc;
+        use tokio::sync::RwLock;
 
-        let hub = Arc::new(self);
+        let hub = Arc::new(RwLock::new(self));
 
-        println!("Hub ID52: {}", hub.config.hub_id52);
-        println!("FASTN_HOME: {:?}", hub.home);
+        // Get hub info for printing before we move hub into closures
+        let hub_id52 = hub.read().await.config.hub_id52.clone();
+        let home = hub.read().await.home.clone();
+        let secret_key = hub.read().await.secret_key.clone();
+
+        println!("Hub ID52: {}", hub_id52);
+        println!("FASTN_HOME: {:?}", home);
         println!("Listening on http://0.0.0.0:{}", port);
         println!("  Web UI: http://0.0.0.0:{}/", port);
         println!("  API: http://0.0.0.0:{}{}", port, ENDPOINT);
-
-        // Create the axum handler
-        let hub_clone = hub.clone();
-        let secret_key = hub.secret_key.clone();
 
         // Static file handler
         async fn serve_static(Path(path): Path<String>) -> Response {
@@ -1059,11 +1139,41 @@ impl Hub {
             }
         }
 
+        // Clone hub for each endpoint
+        let hub_for_info = hub.clone();
+        let hub_for_register = hub.clone();
+        let hub_for_fastn = hub.clone();
+
         let app = Router::new()
             .route("/", get(serve_index))
+            // Hub info endpoint (public, no auth needed)
+            .route("/hub-info", get(move || {
+                let hub = hub_for_info.clone();
+                async move {
+                    let hub = hub.read().await;
+                    Json(hub.hub_info())
+                }
+            }))
+            // Register spoke endpoint (checks password)
+            .route("/register-spoke", post(move |Json(req): Json<RegisterSpokeRequest>| {
+                let hub = hub_for_register.clone();
+                async move {
+                    let mut hub = hub.write().await;
+                    match hub.register_spoke_with_password(&req.spoke_id52, &req.alias, &req.password).await {
+                        Ok(()) => Json(RegisterSpokeResponse {
+                            success: true,
+                            error: None,
+                        }),
+                        Err(e) => Json(RegisterSpokeResponse {
+                            success: false,
+                            error: Some(e.to_string()),
+                        }),
+                    }
+                }
+            }))
             .route("/{*path}", get(serve_static))
             .route(ENDPOINT, post(move |Json(signed_req): Json<SignedRequest>| {
-                let hub = hub_clone.clone();
+                let hub = hub_for_fastn.clone();
                 let secret_key = secret_key.clone();
                 async move {
                     // Verify and extract the request
@@ -1081,6 +1191,7 @@ impl Hub {
                     // Handle the request
                     // The sender identity is derived from the signature (sender_id52),
                     // not from any untrusted field in the request
+                    let hub = hub.read().await;
                     let result = hub.handle_request(&sender_id52, request).await;
 
                     // Wrap in envelope and sign response
